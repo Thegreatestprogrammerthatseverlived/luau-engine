@@ -4,36 +4,28 @@
 
 ## 1. Permissions
 
-Permission is hereby granted to any individual to:
+Users are permitted to:
 
 - View and inspect the source code.
-- Download the source code for personal use.
+- Download the source code.
 - Modify the source code for personal, non-commercial use.
 - Use modified versions privately.
 
 ## 2. Restrictions
 
-The following actions are strictly prohibited without prior written permission from the copyright holder:
+Without prior written permission from the copyright holder, users may not:
 
-- Redistributing the original source code.
-- Redistributing modified versions of the source code.
-- Selling or commercially exploiting the software.
-- Publishing copies of the software on other platforms.
-- Sublicensing the software.
-- Claiming ownership or authorship of the original software.
+- Redistribute the original software.
+- Redistribute modified versions of the software.
+- Publish, upload, share, or sell copies of the software, whether modified or unmodified.
+- Distribute compiled, packaged, or otherwise transformed versions of the software.
+- Claim ownership of the original software.
+- Remove or alter copyright notices.
 
-## 3. Ownership
+These restrictions apply regardless of whether distribution is free or commercial.
 
-All rights, title, and interest in the original software remain with the copyright holder.
+## 3. Modification Rights
 
-Modifying the software does not grant ownership of the original software.
+Users may freely modify the software for their own private, non-commercial use.
 
-## 4. Termination
-
-Any violation of this license automatically terminates the permissions granted under it.
-
-## 5. Disclaimer
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
-
-TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE COPYRIGHT HOLDER SHALL NOT BE LIABLE FOR DAMAGES ARISING FROM THE USE OF THIS SOFTWARE.
+However, permission to modify the software does not grant permission to distribute, publish, sublicense, or sell the resulting modified versions.
