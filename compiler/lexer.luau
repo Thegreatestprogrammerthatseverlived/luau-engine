@@ -33,6 +33,8 @@ const KEYWORDS = {
 	["public"] = "PUBLIC",
 	["protected"] = "PROTECTED",
 	["static"] = "STATIC",
+	["namespace"] = "NAMESPACE",
+	["new"] = "NEW",
 }
 
 const ONE_CHAR = {
