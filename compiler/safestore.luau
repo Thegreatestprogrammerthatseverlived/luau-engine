@@ -1,3 +1,16 @@
+--[[
+Example usage
+
+const SafeStore = require(script.SafeStore)
+
+local realStore = game:GetService("DataStoreService"):GetDataStore("PlayerData")
+local store = SafeStore.new(realStore)
+
+store:SetAsync("Player_123", {
+	Coins = 100,
+})
+]]
+
 -- Require Dependencies
 const filters = require(script.Parent.exclusions)
 
