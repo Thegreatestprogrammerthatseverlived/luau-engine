@@ -11,6 +11,10 @@ const KEYWORDS = {
 	"static",
 	"new",
 	"namespace",
+	"super",
+	"abstract",
+	"override",
+	"enum",
 }
 
 local function isCode(source: string, targetIndex: number): boolean
