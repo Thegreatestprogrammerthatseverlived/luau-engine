@@ -1,0 +1,6 @@
+return {
+  DataStoreService = {
+    "ExperienceData",
+    "GlobalGameData",
+  }
+}
