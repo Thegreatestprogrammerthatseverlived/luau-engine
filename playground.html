@@ -21,6 +21,7 @@
       padding: 8px 13px; cursor: pointer; font-weight: 600;
     }
     button:hover { background: #2b3342; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
     #transpileBtn { background: #2563eb; border-color: #2563eb; }
     #transpileBtn:hover { background: #1d4ed8; }
     main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
@@ -39,6 +40,8 @@
     .ok { color: #86efac !important; }
     .error { color: #fca5a5 !important; }
     @media (max-width: 850px) {
+      header { height: auto; min-height: 58px; flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+      .actions { flex-wrap: wrap; }
       main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
       .pane:first-child { border-right: 0; border-bottom: 1px solid #2a2f3a; }
     }
@@ -48,13 +51,14 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v22 preview · live lint</span>
+      <span>pronounced “Lawah” · v3.8 · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn">Example</button>
       <button id="clearBtn">Clear</button>
       <button id="lintBtn">Lint</button>
       <button id="transpileBtn">Transpile</button>
+      <button id="copyBtn" title="Copy generated Luau code">Copy Luau</button>
     </div>
   </header>
 
@@ -222,7 +226,7 @@ operation:andThen(function(result)
     print(result)
 end)
 
--- v22 preview additions
+-- Laua examples
 local numbers = {1, 2, 3}
 local doubled = (n) => n * 2
 local mapped = table.map(numbers, doubled)
@@ -1404,7 +1408,7 @@ local part = message[1:7]`;
           [/\bregex\.(?:match|find)\s*\(/, 'Full regular expressions']
         ];
         for (const [pattern,feature] of pending) {
-          if (pattern.test(line)) throw new Error(`${feature} are not implemented in this v22 preview.`);
+          if (pattern.test(line)) throw new Error(`${feature} are not implemented in this v3.8 playground.`);
         }
       }
     }
@@ -5343,6 +5347,7 @@ local part = message[1:7]`;
       });
 
       const status = document.getElementById("status");
+      const copyButton = document.getElementById("copyBtn");
 
       status.textContent = "Loading full Roblox API autocomplete...";
 
@@ -5488,14 +5493,81 @@ local part = message[1:7]`;
           const directives = readPlaygroundDirectives(lauaEditor.getValue());
           status.textContent = `Transpiled · ${directives.mode} · optimize ${directives.optimize ?? "default"} (applied by Roblox when pasted into Studio)`;
           status.className = "ok";
+          return output;
         } catch (err) {
+          // Never let Copy use stale code from an earlier successful transpilation.
+          luauEditor.setValue("");
           status.textContent = "Transpile error: " + (err?.message || String(err));
           status.className = "error";
+          return null;
+        }
+      }
+
+      function copyTextFallback(text) {
+        const activeElement = document.activeElement;
+        const field = document.createElement("textarea");
+        field.value = text;
+        field.setAttribute("readonly", "");
+        field.style.position = "fixed";
+        field.style.opacity = "0";
+        field.style.left = "-9999px";
+        document.body.appendChild(field);
+        field.focus();
+        field.select();
+
+        let succeeded = false;
+        try {
+          succeeded = document.execCommand("copy");
+        } finally {
+          field.remove();
+          activeElement?.focus?.();
+        }
+        if (!succeeded) throw new Error("Browser blocked copying");
+      }
+
+      async function copyTranspiledCode() {
+        // Transpile again so the copied code always matches the current Laua source.
+        if (!lauaEditor.getValue().trim()) {
+          status.textContent = "Nothing to copy. Enter Laua code first.";
+          status.className = "error";
+          return;
+        }
+
+        const output = runTranspile();
+        if (output === null) return;
+        if (!output.trim()) {
+          status.textContent = "Nothing to copy. The transpiled output is empty.";
+          status.className = "error";
+          return;
+        }
+
+        copyButton.disabled = true;
+        try {
+          if (navigator.clipboard?.writeText) {
+            try {
+              await navigator.clipboard.writeText(output);
+            } catch {
+              copyTextFallback(output);
+            }
+          } else {
+            copyTextFallback(output);
+          }
+
+          status.textContent = "Copied transpiled Luau to clipboard.";
+          status.className = "ok";
+          copyButton.textContent = "Copied!";
+          setTimeout(() => { copyButton.textContent = "Copy Luau"; }, 1500);
+        } catch (err) {
+          status.textContent = "Copy failed: " + (err?.message || String(err));
+          status.className = "error";
+        } finally {
+          copyButton.disabled = false;
         }
       }
 
       document.getElementById("lintBtn").addEventListener("click", () => runLint(true));
       document.getElementById("transpileBtn").addEventListener("click", runTranspile);
+      copyButton.addEventListener("click", copyTranspiledCode);
       document.getElementById("exampleBtn").addEventListener("click", () => {
         lauaEditor.setValue(STARTER);
         runTranspile();
