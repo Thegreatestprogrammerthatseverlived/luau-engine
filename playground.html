@@ -43,7 +43,7 @@
     dialog::backdrop { background:rgba(0,0,0,.7); }
     #diffResult { max-height:65vh; overflow:auto; background:#0c1018; padding:14px; font-size:12px; white-space:pre; line-height:1.5; }
 
-    /* v3.10 multi-file project workspace */
+    /* v3.11 multi-file project workspace */
     .actions { flex-wrap: wrap; justify-content: flex-end; }
     .file-tabs { display:flex; align-items:center; gap:3px; flex:1; min-width:0; overflow-x:auto; scrollbar-width:thin; }
     .file-tab { white-space:nowrap; display:inline-flex; align-items:center; gap:7px; background:transparent; color:#a6b3c6; border:1px solid transparent; border-bottom:2px solid transparent; border-radius:7px 7px 0 0; padding:7px 9px; font-size:12px; font-weight:500; }
@@ -74,7 +74,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.10 · multi-file · live lint</span>
+      <span>pronounced “Lawah” · v3.11 · multi-file · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn">Example</button>
@@ -283,6 +283,8 @@ local mapped = table.map(numbers, doubled)
 local allNumbers = {...numbers, ...mapped}
 local message = "Welcome to Laua"
 local part = message[1:7]`;
+
+    const PREVIOUS_MAIN_STARTER = "import {Zombie} from \"./Zombie\"\nimport {Player} from \"./Player\"\n\nlocal zombie = new Zombie\nlocal player = new Player\nprint(zombie.Health, player.Name)";
 
     function replaceRange(source, start, end, replacement) {
       return source.slice(0, start) + replacement + source.slice(end);
@@ -5688,7 +5690,12 @@ local part = message[1:7]`;
           for (const entry of saved.files) {
             const name=normalizeProjectFilename(entry.name);
             if (seen.has(name) || typeof entry.source!=="string") return null;
-            seen.add(name);safe.push({name,source:entry.source});
+            // Upgrade only the untouched v3.10 main.laua demo.
+            // Keep every user-edited source file unchanged.
+            const source = name === "main.laua" && entry.source === PREVIOUS_MAIN_STARTER
+              ? STARTER
+              : entry.source;
+            seen.add(name);safe.push({name,source});
           }
           return {files:safe,active:seen.has(saved.active)?saved.active:safe[0].name};
         } catch { return null; }
@@ -5881,7 +5888,7 @@ local part = message[1:7]`;
             entries.push({name:"luau/"+item.outputName,content:item.output});
           }
           const zip=makeProjectZip(entries);
-          downloadProjectBlob("Laua-v3.10-project.zip",zip);
+          downloadProjectBlob("Laua-v3.11-project.zip",zip);
           projectStatus().textContent=`Exported ${all.length} Laua files + ${all.length} Luau outputs.`;
           projectStatus().className="ok";
         } catch(error) {
@@ -6304,7 +6311,7 @@ local part = message[1:7]`;
       // Restore locally saved tabs (browser-local) or create a three-file starter project.
       const savedProject=restoredProject();
       const seed=savedProject?.files || [
-        {name:"main.laua",source:'import {Zombie} from "./Zombie"\nimport {Player} from "./Player"\n\nlocal zombie = new Zombie\nlocal player = new Player\nprint(zombie.Health, player.Name)' .replaceAll("\\n", "\n")},
+        {name:"main.laua",source:STARTER},
         {name:"Zombie.laua",source:'export class Zombie\n    Health = 100\nend'.replaceAll("\\n", "\n")},
         {name:"Player.laua",source:'export class Player\n    Name = "Guest"\nend'.replaceAll("\\n", "\n")}
       ];
