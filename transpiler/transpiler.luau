@@ -1,5 +1,253 @@
 local Transpiler = {}
 
+-- Embedded runtime sources. Generated scripts are self-contained and never require LauaAsync/LauaCore/LauaSignal.
+
+local LAUA_ASYNC_RUNTIME_SOURCE = [====[
+local Async = {}
+local Promise = {}
+Promise.__index = Promise
+
+local function isPromise(value)
+    return type(value) == "table" and getmetatable(value) == Promise
+end
+
+local function settle(promise, status, values)
+    if promise._status ~= "Pending" then return end
+    promise._status = status
+    promise._values = values
+    for _, thread in promise._waiters do
+        task.spawn(thread, status == "Fulfilled", table.unpack(values, 1, values.n))
+    end
+    table.clear(promise._waiters)
+end
+
+function Async.run(callback, ...)
+    assert(type(callback) == "function", "Async.run expects a function")
+    local promise = setmetatable({_status = "Pending", _values = nil, _waiters = {}}, Promise)
+    local args = table.pack(...)
+    task.spawn(function()
+        local result = table.pack(xpcall(function()
+            return callback(table.unpack(args, 1, args.n))
+        end, function(err) return err end))
+        if result[1] then
+            local values = table.pack(table.unpack(result, 2, result.n))
+            if values.n == 1 and isPromise(values[1]) then
+                local settled = table.pack(pcall(Async.await, values[1]))
+                if settled[1] then
+                    settle(promise, "Fulfilled", table.pack(table.unpack(settled, 2, settled.n)))
+                else
+                    settle(promise, "Rejected", table.pack(settled[2]))
+                end
+            else
+                settle(promise, "Fulfilled", values)
+            end
+        else
+            settle(promise, "Rejected", table.pack(result[2]))
+        end
+    end)
+    return promise
+end
+
+function Async.await(value)
+    if not isPromise(value) then return value end
+    if value._status == "Fulfilled" then
+        return table.unpack(value._values, 1, value._values.n)
+    end
+    if value._status == "Rejected" then error(value._values[1], 2) end
+    local current = coroutine.running()
+    if not current then error("await requires a yieldable coroutine", 2) end
+    table.insert(value._waiters, current)
+    local outcome = table.pack(coroutine.yield())
+    if not outcome[1] then error(outcome[2], 2) end
+    return table.unpack(outcome, 2, outcome.n)
+end
+
+function Promise:await()
+    return Async.await(self)
+end
+
+function Promise:andThen(callback)
+    return Async.run(function()
+        return callback(Async.await(self))
+    end)
+end
+
+function Promise:catch(callback)
+    return Async.run(function()
+        local result = table.pack(pcall(Async.await, self))
+        if result[1] then return table.unpack(result, 2, result.n) end
+        return callback(result[2])
+    end)
+end
+
+function Promise:finally(callback)
+    return Async.run(function()
+        local result = table.pack(pcall(Async.await, self))
+        callback()
+        if not result[1] then error(result[2], 0) end
+        return table.unpack(result, 2, result.n)
+    end)
+end
+
+function Promise:getStatus()
+    return self._status
+end
+
+Async.Promise = Promise
+Async.isPromise = isPromise
+return Async
+]====]
+
+local LAUA_CORE_RUNTIME_SOURCE = [====[
+local LauaCore = {}
+
+function LauaCore.optional(value: any, key: any): any
+    if value == nil then return nil end
+    return value[key]
+end
+
+function LauaCore.coalesce(value: any, fallback: () -> any): any
+    if value ~= nil then return value end
+    return fallback()
+end
+
+
+-- Laua v22: spread merges consecutive array entries and then named keys.
+function LauaCore.spread(...: any): {[any]: any}
+    local result = {}
+    for index = 1, select("#", ...) do
+        local item = select(index, ...)
+        assert(type(item) == "table", "spread expects tables")
+        for arrayIndex = 1, #item do
+            table.insert(result, item[arrayIndex])
+        end
+        for key, value in item do
+            if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > #item then
+                result[key] = value
+            end
+        end
+    end
+    return result
+end
+
+function LauaCore.slice(value: any, first: number?, last: number?): any
+    local valueType = typeof(value)
+    if valueType == "string" then
+        return string.sub(value, first or 1, last or #value)
+    end
+    if valueType == "buffer" then
+        local length = buffer.len(value)
+        local startIndex = first or 1
+        local endIndex = last or length
+        if startIndex < 0 then startIndex = length + startIndex + 1 end
+        if endIndex < 0 then endIndex = length + endIndex + 1 end
+        startIndex = math.clamp(startIndex, 1, length + 1)
+        endIndex = math.clamp(endIndex, 0, length)
+        local size = math.max(0, endIndex - startIndex + 1)
+        local result = buffer.create(size)
+        if size > 0 then buffer.copy(result, 0, value, startIndex - 1, size) end
+        return result
+    end
+    error("slice supports strings and buffers only")
+end
+
+LauaCore.table = {}
+
+function LauaCore.table.filter(items: {any}, predicate: (any, number) -> boolean): {any}
+    local out = {}
+    for index, item in items do
+        if predicate(item, index) then table.insert(out, item) end
+    end
+    return out
+end
+
+function LauaCore.table.map(items: {any}, callback: (any, number) -> any): {any}
+    local out = {}
+    for index, item in items do
+        out[index] = callback(item, index)
+    end
+    return out
+end
+
+function LauaCore.table.reduce(items: {any}, callback: (any, any, number) -> any, initial: any): any
+    local current = initial
+    for index, item in items do current = callback(current, item, index) end
+    return current
+end
+
+function LauaCore.table.findWhere(items: {any}, predicate: (any, number) -> boolean): any
+    for index, item in items do
+        if predicate(item, index) then return item end
+    end
+    return nil
+end
+
+-- Lazy imports can break *some* initialisation cycles if neither module
+-- accesses the other before both have finished loading.
+function LauaCore.lazyModule(resolve: () -> any): any
+    local loaded = false
+    local target = nil
+    local function get()
+        if not loaded then
+            target = resolve()
+            loaded = true
+        end
+        return target
+    end
+    return setmetatable({}, {
+        __index = function(_, key) return get()[key] end,
+        __newindex = function(_, key, value) get()[key] = value end,
+        __call = function(_, ...) return get()(...) end,
+    })
+end
+
+return LauaCore
+]====]
+
+local LAUA_SIGNAL_RUNTIME_SOURCE = [====[
+local Signal = {}
+Signal.__index = Signal
+
+function Signal.new()
+    return setmetatable({ _event = Instance.new("BindableEvent"), _destroyed = false }, Signal)
+end
+
+function Signal:Connect(callback: (...any) -> ())
+    assert(not self._destroyed, "Cannot connect to a destroyed signal")
+    assert(type(callback) == "function", "Connect expects a function")
+    return self._event.Event:Connect(callback)
+end
+
+function Signal:Once(callback: (...any) -> ())
+    assert(type(callback) == "function", "Once expects a function")
+    local connection
+    connection = self:Connect(function(...)
+        if connection then connection:Disconnect() end
+        callback(...)
+    end)
+    return connection
+end
+
+function Signal:Fire(...)
+    assert(not self._destroyed, "Cannot fire a destroyed signal")
+    self._event:Fire(...)
+end
+
+function Signal:Wait()
+    assert(not self._destroyed, "Cannot wait on a destroyed signal")
+    return self._event.Event:Wait()
+end
+
+function Signal:Destroy()
+    if self._destroyed then return end
+    self._destroyed = true
+    self._event:Destroy()
+end
+
+return Signal
+]====]
+
+
 local function trim(value: string): string
     return (value:match("^%s*(.-)%s*$") or "")
 end
@@ -1374,18 +1622,37 @@ local function transpileAwaits(source: string): (string, number)
     return source, #occurrences
 end
 
-local function insertRuntimeRequire(source: string, expression: string): string
+-- Insert each required runtime exactly once, AFTER any --! header directives.
+-- All three runtime implementations live inside this ModuleScript, so the generated
+-- Luau has no dependency on sibling Laua runtime ModuleScripts.
+local function insertEmbeddedRuntimes(source: string): string
+    local fragments = {}
+    if source:find("__lauaAsync.", 1, true) then
+        table.insert(fragments, "local __lauaAsync = (function()\n" .. LAUA_ASYNC_RUNTIME_SOURCE .. "\nend)()")
+    end
+    if source:find("__lauaCore.", 1, true) then
+        table.insert(fragments, "local __lauaCore = (function()\n" .. LAUA_CORE_RUNTIME_SOURCE .. "\nend)()")
+    end
+    if source:find("__lauaSignal.", 1, true) then
+        table.insert(fragments, "local __lauaSignal = (function()\n" .. LAUA_SIGNAL_RUNTIME_SOURCE .. "\nend)()")
+    end
+    if #fragments == 0 then return source end
+
     local lines = splitLines(source)
     local index = 1
     while index <= #lines do
         local line = trim(lines[index].Text)
-        if line:match("^%-%-!") or line == "" then index += 1 else break end
+        if line:match("^%-%-!") or line == "" then
+            index += 1
+        else
+            break
+        end
     end
-    local first = index <= #lines and lines[index].Start or (#source + 1)
-    return source:sub(1, first - 1) .. "local __lauaAsync = " .. expression .. "\n" .. source:sub(first)
+    local at = index <= #lines and lines[index].Start or (#source + 1)
+    return source:sub(1, at - 1) .. table.concat(fragments, "\n\n") .. "\n\n" .. source:sub(at)
 end
 
-function Transpiler.Transpile(source: string, runtimeRequire: string?): string
+function Transpiler.Transpile(source: string, _runtimeRequire: string?): string
     assert(type(source) == "string", "Expected Laua source string")
     validateV22Experimental(source)
     source = transpileAdditionalSyntax(source)
@@ -1396,15 +1663,7 @@ function Transpiler.Transpile(source: string, runtimeRequire: string?): string
     local awaitCount
     output, awaitCount = transpileAwaits(output)
     if awaitCount > 0 and asyncCount == 0 then error("await requires an async function") end
-    if asyncCount > 0 or awaitCount > 0 then
-        output = insertRuntimeRequire(output, runtimeRequire or 'require(script.Parent.LauaAsync)')
-    end
-    if output:find("__lauaCore.", 1, true) then
-        output = insertRuntimeRequire(output, 'require(script.Parent.LauaCore)'):gsub("local __lauaAsync = require%(script.Parent.LauaCore%)", "local __lauaCore = require(script.Parent.LauaCore)", 1)
-    end
-    if output:find("__lauaSignal.", 1, true) then
-        output = insertRuntimeRequire(output, 'require(script.Parent.LauaSignal)'):gsub("local __lauaAsync = require%(script.Parent.LauaSignal%)", "local __lauaSignal = require(script.Parent.LauaSignal)", 1)
-    end
+    output = insertEmbeddedRuntimes(output)
     if #exportedNames > 0 then
         local values = {}
         for _, name in exportedNames do table.insert(values, `{name} = {name}`) end
