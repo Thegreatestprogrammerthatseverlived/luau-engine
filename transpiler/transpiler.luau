@@ -93,8 +93,8 @@ end
 
 local function blockStart(line: string): boolean
 	if line:match("^abstract%s+class%s+") or line:match("^final%s+class%s+") or line:match("^class%s+") then return true end
-	if line:match("^namespace%s+") or line:match("^return%s+namespace%s+") or line:match("^enum%s+") then return true end
-	if line:match("^constructor%s*%(") or line:match("^defer%s*$") then return true end
+	if line:match("^namespace%s+") or line:match("^return%s+namespace%s+") or line:match("^enum%s+") or line:match("^match%s+") then return true end
+	if line:match("^constructor%s*%(") or line:match("^defer%s*$") or line:match("^operator%s+") then return true end
 	if line:match("^async%s+function%s+") or line:match("^local%s+async%s+function%s+") then return true end
 	if line:match("^get%s+[%a_][%w_]*%s*%(") or line:match("^set%s+[%a_][%w_]*%s*%(") then return true end
 	if line:match("^function%s+") or line:match("^local%s+function%s+") then return true end
@@ -322,7 +322,7 @@ local function transpileClasses(source: string): string
 		local closing = findBlock(source, start)
 		local body = source:sub(headerEnd + 1, closing.Start - 1)
 		local lines = splitLines(body)
-		local fields, statics, methods, getters, setters = {}, {}, {}, {}, {}
+		local fields, statics, methods, getters, setters, operators, signals = {}, {}, {}, {}, {}, {}, {}
 		local attributes = {}
 		local names = {}
 		local ctor = nil
@@ -354,7 +354,39 @@ local function transpileClasses(source: string): string
 					if memberName then kind = possible; break end
 				end
 			end
-			local ctorParams = remainder:match("^constructor%s*%(([^)]*)%)%s*$")
+			local operatorSymbol, operatorParams = remainder:match("^operator%s+([^%s%(]+)%s*%(([^)]*)%)%s*$")
+            if operatorSymbol then
+                local operatorMap = { ["+"] = "__add", ["-"] = "__sub", ["*"] = "__mul", ["/"] = "__div", ["//"] = "__idiv", ["%"] = "__mod", ["^"] = "__pow", [".."] = "__concat", ["=="] = "__eq", ["<"] = "__lt", ["<="] = "__le", ["#"] = "__len" }
+                local metamethod = operatorMap[operatorSymbol]
+                if not metamethod then error(`Unsupported operator '{operatorSymbol}'`) end
+                if operatorSymbol == "-" and trim(operatorParams) == "" then metamethod = "__unm" end
+                if (metamethod == "__unm" or metamethod == "__len") and trim(operatorParams) ~= "" then error(`Unary operator '{operatorSymbol}' takes no arguments`) end
+                if metamethod ~= "__unm" and metamethod ~= "__len" and not trim(operatorParams):match("^[%a_][%w_]*%s*:?[%w_ ]*$") then error("Binary operator requires exactly one parameter") end
+                if names[metamethod] then error(`Duplicate operator '{operatorSymbol}'`) end
+                if next(modifiers) then error("Operators cannot have modifiers") end
+                names[metamethod] = true
+                local operatorAt = row.Start + (row.Text:find("operator", 1, true) or 1) - 1
+                local operatorEnd = findBlock(body, operatorAt)
+                local operatorHeaderEnd = body:find("\n", operatorAt, true)
+                local operatorBody = operatorHeaderEnd and body:sub(operatorHeaderEnd + 1, operatorEnd.Start - 1) or ""
+                table.insert(operators, {Name = metamethod, Params = operatorParams, Body = operatorBody})
+                local nextIndex = nil
+                for pos = index + 1, #lines do
+                    if lines[pos].Start > operatorEnd.Finish then nextIndex = pos; break end
+                end
+                index = nextIndex or (#lines + 1)
+                continue
+            end
+            local signalName = remainder:match("^signal%s+([%a_][%w_]*)$")
+            if signalName then
+                if names[signalName] then error(`Duplicate class member '{signalName}'`) end
+                if next(modifiers) then error("Signals cannot have modifiers") end
+                names[signalName] = true
+                table.insert(signals, signalName)
+                index += 1
+                continue
+            end
+            local ctorParams = remainder:match("^constructor%s*%(([^)]*)%)%s*$")
 			if kind or ctorParams then
 				local kindStart = row.Start + (row.Text:find(kind or "constructor", 1, true) or 1) - 1
 				local ending = findBlock(body, kindStart)
@@ -455,6 +487,7 @@ local function transpileClasses(source: string): string
 		table.insert(generated, `function {name}.__init(self{ctor and trim(ctor.Params) ~= "" and ", " .. ctor.Params or ""})`)
 		if parentInit then table.insert(generated, "    " .. parentInit) end
 		for _, field in fields do table.insert(generated, `    self.{field.Name} = {transpileSource(field.Value)}`) end
+        for _, signalName in signals do table.insert(generated, `    self.{signalName} = __lauaSignal.new()`) end
 		local innerCtor = normalized(transpileSource(ctorBody), "    ")
 		if innerCtor ~= "" then table.insert(generated, innerCtor) end
 		table.insert(generated, "end")
@@ -478,7 +511,14 @@ local function transpileClasses(source: string): string
 			if code ~= "" then table.insert(generated, code) end
 			table.insert(generated, "end")
 		end
-		for _, method in methods do
+		for _, operator in operators do
+            local nested = base and replaceSuper(operator.Body, base) or operator.Body
+            table.insert(generated, `function {name}.{operator.Name}(self{trim(operator.Params) ~= "" and ", " .. operator.Params or ""})`)
+            local code = normalized(transpileSource(nested), "    ")
+            if code ~= "" then table.insert(generated, code) end
+            table.insert(generated, "end")
+        end
+        for _, method in methods do
 			if base then table.insert(generated, `if {base}.__finalMethods and {base}.__finalMethods["{method.Name}"] then error("Cannot override final method '{method.Name}'") end`) end
 			if base and method.Override then table.insert(generated, `if not {base}.{method.Name} then error("No inherited method '{method.Name}' to override") end`) end
 			local nested = base and replaceSuper(method.Body, base) or method.Body
@@ -546,6 +586,264 @@ transpileSource = function(source: string): string
 	return source
 end
 
+local function replaceRange(source: string, first: number, last: number, replacement: string): string
+    return source:sub(1, first - 1) .. replacement .. source:sub(last + 1)
+end
+
+local function transpileImports(source: string): string
+    local result = {}
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        local line = trim(raw)
+        if not trim(maskNonCode(raw)):match("^import%f[%W]") then
+            table.insert(result, raw)
+            continue
+        end
+        local name, path = line:match('^import%s+([%a_][%w_]*)%s+from%s+"([^"\n]+)"%s*$')
+        if not name then name, path = line:match("^import%s+([%a_][%w_]*)%s+from%s+'([^'\n]+)'%s*$") end
+        if not name or not path then error("Expected import Name from \"./Module\"") end
+        if path:sub(1, 2) ~= "./" and path:sub(1, 3) ~= "../" then error("Import path must be relative to script: ./ or ../") end
+        local current = "script.Parent"
+        local rest = path
+        while rest:sub(1, 3) == "../" do
+            current ..= ".Parent"
+            rest = rest:sub(4)
+        end
+        if rest:sub(1, 2) == "./" then rest = rest:sub(3) end
+        if rest == "" then error("Import must name a ModuleScript") end
+        for segment in rest:gmatch("[^/]+") do
+            if not segment:match("^[%a_][%w_]*$") then error(`Invalid module path segment '{segment}'`) end
+            current ..= `:WaitForChild("{segment}")`
+        end
+        table.insert(result, (raw:match("^[ \t]*") or "") .. `local {name} = require({current})`)
+    end
+    return table.concat(result, "\n")
+end
+
+local function transpileDestructuring(source: string): string
+    local result = {}
+    local serial = 0
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        if not trim(maskNonCode(raw)):match("^local%s*%{") then
+            table.insert(result, raw)
+            continue
+        end
+        local indent, names, expression = raw:match("^([ \t]*)local%s*%{([^{}]+)%}%s*=%s*(.-)%s*$")
+        if not names or trim(expression) == "" then error("Expected local {a, b} = tableExpression") end
+        serial += 1
+        local temporary = `__lauaDestructure{serial}`
+        table.insert(result, indent .. `local {temporary} = {expression}`)
+        local found = {}
+        for segment in names:gmatch("[^,]+") do
+            local key, alias = trim(segment):match("^([%a_][%w_]*)%s*:%s*([%a_][%w_]*)$")
+            if not key then key = trim(segment); alias = key end
+            if not key:match("^[%a_][%w_]*$") or found[alias] then error(`Invalid or duplicate destructured name '{segment}'`) end
+            found[alias] = true
+            table.insert(result, indent .. `local {alias} = {temporary}.{key}`)
+        end
+    end
+    return table.concat(result, "\n")
+end
+
+local function transpileMatches(source: string): string
+    local serial = 0
+    while true do
+        local masked = maskNonCode(source)
+        local start = nil
+        local from = 1
+        while true do
+            local position = findKeyword(source:sub(from), "match")
+            if not position then break end
+            position += from - 1
+            local lineStart = (source:sub(1, position - 1):match(".*()\n") or 0) + 1
+            if trim(masked:sub(lineStart, position - 1)) == "" then start = position end
+            from = position + 5
+        end
+        if not start then return source end
+        local headerEnd = source:find("\n", start, true)
+        if not headerEnd then error("match needs case branches") end
+        local expression = trim(source:sub(start + 5, headerEnd - 1))
+        if expression == "" then error("match requires an expression") end
+        local closing = findBlock(source, start)
+        local body = source:sub(headerEnd + 1, closing.Start - 1)
+        local branches = {}
+        local active = nil
+        local depth = 0
+        for _, row in splitLines(body) do
+            local code = trim(maskNonCode(row.Text))
+            local case = trim(row.Text):match("^case%s+(.+)$")
+            local isDefault = code:match("^default%s*$") ~= nil
+            if depth == 0 and (code:match("^case%f[%W]") or isDefault) then
+                if code:match("^case%f[%W]") and (not case or trim(case) == "") then error("case requires a value") end
+                if isDefault and #branches == 0 then error("default must follow a case") end
+                if isDefault then
+                    for _, branch in branches do if branch.Default then error("Duplicate default branch") end end
+                elseif active and active.Default then error("case cannot follow default") end
+                active = {Value = case, Default = isDefault, Lines = {}}
+                table.insert(branches, active)
+            elseif active then
+                table.insert(active.Lines, row.Text)
+            elseif code ~= "" then error("match body requires case or default") end
+            if blockStart(code) then depth += 1 end
+            if code:match("^end%s*;?%s*$") or code:match("^until%s+") then depth -= 1 end
+        end
+        if #branches == 0 then error("match requires at least one case") end
+        serial += 1
+        local variable = `__lauaMatch{serial}`
+        local generated = {"do", `    local {variable} = {expression}`}
+        for index, branch in branches do
+            if branch.Default then
+                table.insert(generated, "    else")
+            else
+                table.insert(generated, `    {index == 1 and "if" or "elseif"} {variable} == {branch.Value} then`)
+            end
+            local content = normalized(table.concat(branch.Lines, "\n"), "        ")
+            if content ~= "" then table.insert(generated, content) end
+        end
+        table.insert(generated, "    end")
+        table.insert(generated, "end")
+        source = replaceRange(source, start, closing.Finish, table.concat(generated, "\n"))
+    end
+end
+
+local function expressionLeft(masked: string, endAt: number): number?
+    local cursor = endAt
+    while cursor > 0 and masked:sub(cursor, cursor):match("[ \t]") do cursor -= 1 end
+    if cursor == 0 then return nil end
+    local endChar = masked:sub(cursor, cursor)
+    if endChar == ")" or endChar == "]" then
+        local opener = endChar == ")" and "(" or "["
+        local depth = 1
+        cursor -= 1
+        while cursor >= 1 do
+            local char = masked:sub(cursor, cursor)
+            if char == endChar then depth += 1 end
+            if char == opener then depth -= 1 end
+            if depth == 0 then break end
+            cursor -= 1
+        end
+        if cursor < 1 then return nil end
+        local prev = cursor - 1
+        while prev > 0 and masked:sub(prev, prev):match("[ \t]") do prev -= 1 end
+        if masked:sub(prev, prev):match("[%w_]") then return expressionLeft(masked, prev) end
+        return cursor
+    end
+    if not endChar:match("[%w_]") then return nil end
+    while cursor > 0 and masked:sub(cursor, cursor):match("[%w_]") do cursor -= 1 end
+    local beginning = cursor + 1
+    if beginning > 1 and (masked:sub(beginning - 1, beginning - 1) == "." or masked:sub(beginning - 1, beginning - 1) == ":") then
+        local previous = expressionLeft(masked, beginning - 2)
+        if previous then return previous end
+    end
+    return beginning
+end
+
+local function expressionRight(source: string, startAt: number): number?
+    local cursor = startAt
+    while cursor <= #source and source:sub(cursor, cursor):match("[ \t]") do cursor += 1 end
+    local first = source:sub(cursor, cursor)
+    if first == "'" or first == '"' then
+        local quote = first
+        cursor += 1
+        while cursor <= #source do
+            local char = source:sub(cursor, cursor)
+            if char == "\\" then cursor += 2 elseif char == quote then cursor += 1; break else cursor += 1 end
+        end
+    elseif first == "(" then
+        local depth = 1
+        cursor += 1
+        while cursor <= #source and depth > 0 do
+            local char = source:sub(cursor, cursor)
+            if char == "(" then depth += 1 elseif char == ")" then depth -= 1 end
+            cursor += 1
+        end
+        if depth ~= 0 then return nil end
+    else
+        local prefix = source:sub(cursor):match("^[%a_][%w_]*") or source:sub(cursor):match("^%-?[%d%.]+")
+        if not prefix then return nil end
+        cursor += #prefix
+    end
+    while cursor <= #source do
+        local suffix = source:sub(cursor):match("^%s*[%.:]([%a_][%w_]*)")
+        local spaces = source:sub(cursor):match("^[ \t]*") or ""
+        if suffix then
+            cursor += #spaces + 1 + #suffix
+        elseif source:sub(cursor + #spaces, cursor + #spaces) == "(" then
+            cursor += #spaces + 1
+            local depth = 1
+            while cursor <= #source and depth > 0 do
+                local char = source:sub(cursor, cursor)
+                if char == "(" then depth += 1 elseif char == ")" then depth -= 1 end
+                cursor += 1
+            end
+            if depth ~= 0 then return nil end
+        else
+            break
+        end
+    end
+    return cursor - 1
+end
+
+local function transpileOptional(source: string): (string, boolean)
+    local changed = false
+    while true do
+        local masked = maskNonCode(source)
+        local pos = masked:find("?.", 1, true)
+        if not pos then return source, changed end
+        local left = expressionLeft(masked, pos - 1)
+        local member = masked:sub(pos + 2):match("^([%a_][%w_]*)")
+        if not left or not member then error("Optional chaining supports value?.property") end
+        local nextChar = (source:sub(pos + 2 + #member):match("^%s*(.)") or "")
+        if nextChar == "(" or nextChar == "[" then error("Optional calls/indexing are not supported: use ?.property only") end
+        local base = trim(source:sub(left, pos - 1))
+        local replacement = `__lauaCore.optional({base}, "{member}")`
+        source = replaceRange(source, left, pos + 1 + #member, replacement)
+        changed = true
+    end
+end
+
+local function transpileCoalescing(source: string): (string, boolean)
+    local changed = false
+    while true do
+        local masked = maskNonCode(source)
+        local pos = nil
+        local cursor = 1
+        while true do
+            local nextPos = masked:find("??", cursor, true)
+            if not nextPos then break end
+            pos = nextPos
+            cursor = nextPos + 2
+        end
+        if not pos then return source, changed end
+        local left = expressionLeft(masked, pos - 1)
+        local right = expressionRight(source, pos + 2)
+        if not left or not right then error("Nil coalescing expects value ?? fallback") end
+        local before = trim(masked:sub(math.max(1, left - 8), left - 1))
+        local after = trim(masked:sub(right + 1):match("^[^\n]*") or "")
+        if before:match("[%+%-%*/%%%^<>~&|]$") or (before:match("%f[%a]and$") or before:match("%f[%a]or$")) then
+            error("Wrap compound ?? left operands in parentheses")
+        end
+        if after:match("^[%+%-%*/%%%^<>=~&|]") or after:match("^%.%.") or (after:match("^and%f[%W]") or after:match("^or%f[%W]")) then
+            error("Wrap compound ?? fallbacks in parentheses")
+        end
+        local a = trim(source:sub(left, pos - 1))
+        local b = trim(source:sub(pos + 2, right))
+        local replacement = `__lauaCore.coalesce({a}, function() return {b} end)`
+        source = replaceRange(source, left, right, replacement)
+        changed = true
+    end
+end
+
+local function transpileExtensions(source: string): string
+    source = transpileImports(source)
+    source = transpileDestructuring(source)
+    source = transpileMatches(source)
+    source = (transpileOptional(source))
+    source = (transpileCoalescing(source))
+    return source
+end
+
 local function transpileDefers(source: string): string
 	local functionLines = {}
 	for _, line in splitLines(source) do
@@ -600,13 +898,28 @@ end
 
 local function transpileUsing(source: string): string
     local output = {}
-    for _, row in splitLines(source) do
-        local raw = row.Text
+    local rows = splitLines(source)
+    local index = 1
+    while index <= #rows do
+        local raw = rows[index].Text
         local masked = trim(maskNonCode(raw))
         if masked:match("^using%f[%W]") then
             local name, expression = trim(raw):match("^using%s+([%a_][%w_]*)%s*=%s*(.+)$")
             if not name then error("using requires exactly one named resource: using name = expression") end
             local indent = raw:match("^[ \t]*") or ""
+            local function openDelimiters(text: string): number
+                local depth = 0
+                for character in maskNonCode(text):gmatch(".") do
+                    if character == "(" or character == "[" or character == "{" then depth += 1 end
+                    if character == ")" or character == "]" or character == "}" then depth -= 1 end
+                end
+                return depth
+            end
+            while openDelimiters(expression) > 0 and index < #rows do
+                index += 1
+                expression ..= "\n" .. rows[index].Text
+            end
+            if openDelimiters(expression) ~= 0 then error("Unclosed using resource expression") end
             local code = {
                 indent .. "local " .. name .. " = " .. expression,
                 indent .. "defer",
@@ -635,6 +948,7 @@ local function transpileUsing(source: string): string
         else
             table.insert(output, raw)
         end
+        index += 1
     end
     return table.concat(output, "\n")
 end
@@ -749,7 +1063,7 @@ end
 
 function Transpiler.Transpile(source: string, runtimeRequire: string?): string
     assert(type(source) == "string", "Expected Laua source string")
-    local output = transpileDefers(transpileSource(transpileUsing(source)))
+    local output = transpileDefers(transpileExtensions(transpileSource(transpileUsing(source))))
     local asyncCount
     output, asyncCount = transpileAsyncFunctions(output)
     local awaitCount
@@ -757,6 +1071,12 @@ function Transpiler.Transpile(source: string, runtimeRequire: string?): string
     if awaitCount > 0 and asyncCount == 0 then error("await requires an async function") end
     if asyncCount > 0 or awaitCount > 0 then
         output = insertRuntimeRequire(output, runtimeRequire or 'require(script.Parent.LauaAsync)')
+    end
+    if output:find("__lauaCore.", 1, true) then
+        output = insertRuntimeRequire(output, 'require(script.Parent.LauaCore)'):gsub("local __lauaAsync = require%(script.Parent.LauaCore%)", "local __lauaCore = require(script.Parent.LauaCore)", 1)
+    end
+    if output:find("__lauaSignal.", 1, true) then
+        output = insertRuntimeRequire(output, 'require(script.Parent.LauaSignal)'):gsub("local __lauaAsync = require%(script.Parent.LauaSignal%)", "local __lauaSignal = require(script.Parent.LauaSignal)", 1)
     end
     return (output:gsub("[ \t]+\n", "\n"))
 end
