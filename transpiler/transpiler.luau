@@ -1040,6 +1040,125 @@ local function transpileCoalescing(source: string): (string, boolean)
     end
 end
 
+-- Laua v22: source-level sugar. Only fully supported forms are lowered.
+-- Keep unsupported proposals from leaking malformed syntax into generated Luau.
+local function validateV22Experimental(source: string)
+    for _, row in splitLines(source) do
+        local line = trim(maskNonCode(row.Text))
+        local reasons = {
+            {"^[%a_][%w_]*:%s*(for|while|repeat)%s", "Labeled loop exits"},
+            {"^break%s+[%a_][%w_]*$", "Labeled break"},
+            {"^continue%s+[%a_][%w_]*$", "Labeled continue"},
+            {"^unique%s+type%s+", "Nominal/unique types"},
+            {"^type%s+[%a_][%w_]*%s*=%s*%[", "Typed positional tables"},
+            {"^type%s+[%a_][%w_]*%s*=%s*truthy%s*$", "Truthy type aliases"},
+            {"^type%s+[%a_][%w_]*%s*=%s*falsy%s*$", "Falsy type aliases"},
+        }
+        for _, entry in reasons do
+            -- Plain pattern alternatives are handled explicitly below.
+            if entry[2] ~= "Labeled loop exits" and line:match(entry[1]) then
+                error(entry[2] .. " are specified for v22 but not yet implemented in the transpiler")
+            end
+        end
+        if line:match("^[%a_][%w_]*:%s*for%s") or line:match("^[%a_][%w_]*:%s*while%s") or line:match("^[%a_][%w_]*:%s*repeat%s") then
+            error("Labeled loop exits are specified for v22 but not yet implemented")
+        end
+        if line:match("^function%s+[%a_][%w_%.:]*%s*<[^>]*:%s*[%a_][%w_]*[^>]*>") then
+            error("Constrained generics need a real type checker and are not yet implemented")
+        end
+        if line:find("regex.match", 1, true) or line:find("regex.find", 1, true) then
+            error("Full regular expressions need a regex runtime and are not yet implemented")
+        end
+    end
+end
+
+local function transpileAdditionalSyntax(source: string): string
+    local rows = {}
+    local sequence = 0
+    for _, row in splitLines(source) do
+        local original = row.Text
+        local stripped = trim(original)
+        local masked = trim(maskNonCode(original))
+        local indent = original:match("^[ \t]*") or ""
+
+        -- Editor-only @nolint is consumed here, not passed to Roblox.
+        if stripped:match("^@nolint%s*%(") and masked:match("^@nolint%s*%(") then
+            local names = stripped:match('^@nolint%s*%(%s*"([%w_, ]+)"%s*%)%s*$')
+            if not names then error('Expected @nolint("WarningName")') end
+            table.insert(rows, indent .. "-- Laua lint suppression: " .. names)
+            continue
+        end
+
+        -- Single-expression lambda, with ordinary identifier parameters.
+        if masked:find("=>", 1, true) then
+            local prefix, params, expression = original:match("^(.-)(%b())%s*=>%s*(.-)%s*$")
+            if not prefix or expression == "" then error("Arrow functions require (parameters) => expression on one line") end
+            local inside = params:sub(2, -2)
+            for item in inside:gmatch("[^,]+") do
+                if not trim(item):match("^[%a_][%w_]*%s*:?%s*[%w_%.%?]*$") then error("Invalid arrow function parameter") end
+            end
+            original = prefix .. "function" .. params .. " return " .. expression .. " end"
+        end
+
+        -- The v22 spread form accepts spreads-only table literals on the RHS.
+        if trim(maskNonCode(original)):find("%.%.%.[%a_]") and original:find("{", 1, true) then
+            local prefix, values = original:match("^(.-)%{%s*(%.%.%.[^{}]-)%s*%}%s*$")
+            if prefix and values then
+                local parts = {}
+                for part in values:gmatch("[^,]+") do
+                    local variable = trim(part):match("^%.%.%.%s*([%a_][%w_%.]*)$")
+                    if not variable then error('Spread literal expects {...first, ...second}') end
+                    table.insert(parts, variable)
+                end
+                original = prefix .. '__lauaCore.spread(' .. table.concat(parts, ', ') .. ')'
+            end
+        end
+
+        -- Slice supports a simple variable/property expression, with optional bounds.
+        local before, owner, first, last, suffix = original:match("^(.-)([%a_][%w_%.]*)%[([%-%d]*)%s*:%s*([%-%d]*)%](.*)$")
+        if owner and maskNonCode(original):find("%[%s*%-?%d*%s*:%s*%-?%d*%s*%]") then
+            if first == "" and last == "" then error("Slice requires at least one bound") end
+            original = before .. "__lauaCore.slice(" .. owner .. ", " .. (first ~= "" and first or "nil") .. ", " .. (last ~= "" and last or "nil") .. ")" .. suffix
+        end
+
+        -- Methods in the core runtime rather than mutating the built-in table library.
+        for _, method in {"filter", "map", "reduce", "findWhere"} do
+            local maskedOriginal = maskNonCode(original)
+            local search = 1
+            while true do
+                local found = maskedOriginal:find("table%." .. method .. "%s*%(", search)
+                if not found then break end
+                original = original:sub(1, found - 1) .. "__lauaCore." .. original:sub(found)
+                maskedOriginal = maskNonCode(original)
+                search = found + #"__lauaCore.table." + #method
+            end
+        end
+
+        -- Explicit lazy import: require is delayed until the proxy is used.
+        local alias, path = trim(original):match('^import%s+lazy%s+([%a_][%w_]*)%s+from%s+"([^"]+)"%s*$')
+        if alias then
+            if path:sub(1, 2) ~= "./" and path:sub(1, 3) ~= "../" then error("Lazy import paths must start with ./ or ../") end
+            local target = "script.Parent"
+            local rest = path
+            while rest:sub(1, 3) == "../" do
+                target ..= ".Parent"
+                rest = rest:sub(4)
+            end
+            if rest:sub(1, 2) == "./" then rest = rest:sub(3) end
+            if rest == "" then error("Lazy import path must name a ModuleScript") end
+            for segment in rest:gmatch("[^/]+") do
+                if not segment:match("^[%a_][%w_]*$") then error(`Invalid lazy import path segment '{segment}'`) end
+                target ..= ':WaitForChild("' .. segment .. '")'
+            end
+            table.insert(rows, indent .. 'local ' .. alias .. ' = __lauaCore.lazyModule(function() return require(' .. target .. ') end)')
+            continue
+        end
+
+        table.insert(rows, original)
+    end
+    return table.concat(rows, "\n")
+end
+
 local function transpileExtensions(source: string): string
     source = transpileImports(source)
     source = transpileDestructuring(source)
@@ -1268,6 +1387,8 @@ end
 
 function Transpiler.Transpile(source: string, runtimeRequire: string?): string
     assert(type(source) == "string", "Expected Laua source string")
+    validateV22Experimental(source)
+    source = transpileAdditionalSyntax(source)
     local withoutExports, exportedNames = transpileExports(source)
     local output = transpileDefers(transpileExtensions(transpileSource(transpileUsing(transpileCoalescingAssign(withoutExports)))))
     local asyncCount
