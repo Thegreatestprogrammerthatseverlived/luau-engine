@@ -48,7 +48,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v21 · 31 custom keywords · live lint</span>
+      <span>pronounced “Lawah” · v22 preview · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn">Example</button>
@@ -84,7 +84,8 @@
 
     const LUAU_ATTRIBUTES = [
       "@native",
-      "@deprecated"
+      "@deprecated",
+      "@nolint"
     ];
 
     const LUAU_DIRECTIVES = [
@@ -161,6 +162,7 @@
         "huge", "pi"
       ],
       table: [
+        "filter", "map", "reduce", "findWhere",
         "clear", "clone", "concat", "create", "find", "freeze", "insert",
         "isfrozen", "maxn", "move", "pack", "remove", "sort", "unpack"
       ],
@@ -218,7 +220,15 @@ end
 local operation = CheckCharacter()
 operation:andThen(function(result)
     print(result)
-end)`;
+end)
+
+-- v22 preview additions
+local numbers = {1, 2, 3}
+local doubled = (n) => n * 2
+local mapped = table.map(numbers, doubled)
+local allNumbers = {...numbers, ...mapped}
+local message = "Welcome to Laua"
+local part = message[1:7]`;
 
     function replaceRange(source, start, end, replacement) {
       return source.slice(0, start) + replacement + source.slice(end);
@@ -1370,7 +1380,82 @@ end)`;
       return lines.join("\n");
     }
 
+    function validateV22Experimental(source) {
+      for (const raw of source.split('\n')) {
+        const line = maskNonCode(raw).trim();
+        const pending = [
+          [/^[A-Za-z_]\w*:\s*(?:for|while|repeat)\b/, 'Labeled loop exits'],
+          [/^(?:break|continue)\s+[A-Za-z_]\w*$/, 'Labeled loop control'],
+          [/^unique\s+type\s+/, 'Nominal/unique types'],
+          [/^type\s+[A-Za-z_]\w*\s*=\s*\[/, 'Typed positional tables'],
+          [/^type\s+[A-Za-z_]\w*\s*=\s*(?:truthy|falsy)\s*$/, 'Truthy/falsy types'],
+          [/^function\s+[A-Za-z_][\w.:]*\s*<[^>]*:\s*[A-Za-z_]\w*[^>]*>/, 'Constrained generics'],
+          [/\bregex\.(?:match|find)\s*\(/, 'Full regular expressions']
+        ];
+        for (const [pattern,feature] of pending) {
+          if (pattern.test(line)) throw new Error(`${feature} are not implemented in this v22 preview.`);
+        }
+      }
+    }
+
+    function transpileAdditionalSyntax(source) {
+      let serial = 0;
+      return source.split("\n").map(raw => {
+        const trimmed = raw.trim();
+        const masked = maskNonCode(raw).trim();
+        const indent = raw.match(/^[\t ]*/)[0];
+        if (/^@nolint\s*\(/.test(masked)) {
+          const match = trimmed.match(/^@nolint\s*\(\s*"([\w, ]+)"\s*\)\s*$/);
+          if (!match) throw new Error('Expected @nolint("WarningName")');
+          return `${indent}-- Laua lint suppression: ${match[1]}`;
+        }
+        if (masked.includes('=>')) {
+          const match = raw.match(/^(.*?)(\([^()]*\))\s*=>\s*(.*?)\s*$/);
+          if (!match || !match[3]) throw new Error('Arrow functions require (parameters) => expression on one line');
+          const params = match[2].slice(1,-1).split(',').map(x=>x.trim()).filter(Boolean);
+          if (params.some(x=> !/^[A-Za-z_]\w*(?:\s*:\s*[A-Za-z_]\w*\??)?$/.test(x))) throw new Error('Invalid arrow function parameter');
+          raw = `${match[1]}function${match[2]} return ${match[3]} end`;
+        }
+        if ((/\.\.\.[A-Za-z_]/.test(maskNonCode(raw))) && raw.includes('{')) {
+          const match = raw.match(/^(.*?)\{\s*(\.\.\.[^{}]*?)\s*\}\s*$/);
+          if (match) {
+            const values=match[2].split(',').map(s=>s.trim());
+            if (values.some(s=>!/^\.\.\.[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(s))) throw new Error('Spread literal expects {...first, ...second}');
+            raw = `${match[1]}__lauaCore.spread(${values.map(s=>s.slice(3)).join(', ')})`;
+          }
+        }
+        const slice = raw.match(/^(.*?)([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\[(-?\d*)\s*:\s*(-?\d*)\](.*)$/);
+        if (slice && /\[-?\d*\s*:\s*-?\d*\]/.test(maskNonCode(raw))) {
+          if (!slice[3] && !slice[4]) throw new Error('Slice requires at least one bound');
+          raw = `${slice[1]}__lauaCore.slice(${slice[2]}, ${slice[3]||'nil'}, ${slice[4]||'nil'})${slice[5]}`;
+        }
+        for (const name of ['filter','map','reduce','findWhere']) {
+          const regex = new RegExp('\\btable\\.'+name+'\\s*\\\(', 'g');
+          const code = maskNonCode(raw);
+          const indices = [...code.matchAll(regex)].map(m=>m.index);
+          for (const index of indices.reverse()) raw = raw.slice(0,index)+'__lauaCore.'+raw.slice(index);
+        }
+        const lazy = raw.trim().match(/^import\s+lazy\s+([A-Za-z_]\w*)\s+from\s+"([^"]+)"\s*$/);
+        if (lazy) {
+          const path = lazy[2];
+          if (!path.startsWith('./') && !path.startsWith('../')) throw new Error('Lazy import paths must start with ./ or ../');
+          let target = 'script.Parent'; let rest = path;
+          while (rest.startsWith('../')) { target += '.Parent'; rest = rest.slice(3); }
+          if (rest.startsWith('./')) rest = rest.slice(2);
+          if (!rest) throw new Error('Lazy import path must name a ModuleScript');
+          for (const part of rest.split('/')) {
+            if (!/^[A-Za-z_]\w*$/.test(part)) throw new Error('Invalid lazy import path segment '+part);
+            target += `:WaitForChild("${part}")`;
+          }
+          return `${indent}local ${lazy[1]} = __lauaCore.lazyModule(function() return require(${target}) end)`;
+        }
+        return raw;
+      }).join('\n');
+    }
+
     function transpile(source, runtimeRequire) {
+      validateV22Experimental(source);
+      source = transpileAdditionalSyntax(source);
       const exported = transpileExports(source);
       const deferred = transpileDeferFunctions(transpileExtensions(transpileCore(transpileUsing(transpileCoalescingAssign(exported.source)))));
       const asynchronous = transpileAsyncFunctions(deferred);
@@ -3230,6 +3315,18 @@ end)`;
         let end = cursor;
         const attributes = [];
 
+        if (source.slice(start).startsWith('@nolint(')) {
+          const lineEnd = source.indexOf('\n',start);
+          const endAt = lineEnd < 0 ? source.length : lineEnd;
+          const directive = source.slice(start,endAt).trim();
+          if (!/^@nolint\("[A-Za-z_][A-Za-z0-9_]*"\)$/.test(directive)) {
+            pushMarker(start,endAt,monaco.MarkerSeverity.Error,
+              'Use @nolint("UnusedLocal") on its own line.');
+          }
+          cursor = endAt;
+          continue;
+        }
+
         if (source[cursor] === "[") {
           const group = readLauaAttributeGroup(source, cursor);
           end = group.end;
@@ -3863,12 +3960,26 @@ end)`;
       return "Other";
     }
 
-    function suppressPlaygroundLints(markers, directives) {
+    function suppressPlaygroundLints(markers, directives, source = '') {
+      const lineMap = new Map();
+      const lines = source.split('\n');
+      for (let i=0;i<lines.length;i++) {
+        const directive = lines[i].trim().match(/^@nolint\("([A-Za-z_][A-Za-z0-9_]*)"\)$/);
+        if (!directive) continue;
+        let next=i+1;
+        while (next<lines.length && !lines[next].trim()) next++;
+        if (next<lines.length) {
+          const rules=lineMap.get(next+1)||new Set();
+          rules.add(directive[1].toLowerCase());
+          lineMap.set(next+1,rules);
+        }
+      }
       return markers.filter(marker => {
         if (marker.group === "type") return directives.mode !== "nocheck";
         if (marker.severity === monaco.MarkerSeverity.Error) return true;
         if (directives.nolint) return false;
         const rule = (marker.rule || lintWarningRule(marker.message)).toLowerCase();
+        if (lineMap.get(marker.startLineNumber)?.has(rule)) return false;
         return !directives.disabledLints.has(rule);
       });
     }
@@ -4134,7 +4245,7 @@ end)`;
         transpile(source);
       } catch (error) {
         const message = error?.message || String(error);
-        if (/final|getter|setter|property|defer|using|async|await|super|constructor|Invalid member|lazy|watch|export|import|match|\?\?=/i.test(message)) {
+        if (/final|getter|setter|property|defer|using|async|await|super|constructor|Invalid member|lazy|watch|export|import|match|\?\?=|Labeled|Constrained|Nominal|positional|Truthy|falsy|regular expressions|Spread|Arrow|Slice/i.test(message)) {
           pushMarker(0, Math.max(1, source.length && Math.min(source.length, 5)), monaco.MarkerSeverity.Error, message, "syntax");
         }
       }
@@ -4167,7 +4278,7 @@ end)`;
       lintPlaygroundTypes(source, masked, directives, pushMarker);
       lintPlaygroundDeprecations(source, masked, pushMarker);
 
-      const visibleMarkers = suppressPlaygroundLints(markers, directives);
+      const visibleMarkers = suppressPlaygroundLints(markers, directives, source);
       monaco.editor.setModelMarkers(model, "laua", visibleMarkers);
 
       return {
@@ -4217,7 +4328,7 @@ end)`;
             [/--!\s*optimize\s+[012]\b.*$/, "keyword.directive"],
             [/--!\s*(?:strict|nonstrict|nocheck|native|nolint)\b.*$/, "keyword.directive"],
             [/@\[/, { token: "keyword.attribute", next: "@attributeList" }],
-            [/@(?:native|deprecated)\b/, "keyword.attribute"],
+            [/@(?:native|deprecated|nolint)\b/, "keyword.attribute"],
 
             [/--\[(=*)\[/, { token: "comment", next: "@longComment.$1" }],
             [/--.*$/, "comment"],
@@ -4237,7 +4348,7 @@ end)`;
               ["keyword.laua", "", "@brackets"]],
             [/\b(public|private|protected|static|override|abstract|extends|new|super)\b/, "keyword.laua"],
 
-            [/\?\.|\?\?/, "operator"],
+            [/=>|\.\.\.|\?\?=?|\?\./, "operator.laua"],
             [/([.:])([A-Za-z_][A-Za-z0-9_]*)/, [
               "delimiter",
               "member"
@@ -4850,6 +4961,7 @@ end)`;
           { token: "string.escape", foreground: "F9A8D4" },
           { token: "comment", foreground: "64748B", fontStyle: "italic" },
           { token: "operator", foreground: "F8FAFC" },
+          { token: "operator.laua", foreground: "C084FC", fontStyle: "bold" },
           { token: "constant.language", foreground: "FB7185" }
         ],
         colors: {
