@@ -48,7 +48,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v20 · 27 custom keywords · live lint</span>
+      <span>pronounced “Lawah” · v21 · 31 custom keywords · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn">Example</button>
@@ -78,7 +78,8 @@
       "class", "extends", "constructor", "private", "public", "protected",
       "static", "new", "namespace", "super", "abstract", "override", "enum",
       "final", "get", "set", "defer", "using", "async", "await",
-      "match", "case", "default", "import", "from", "operator", "signal"
+      "match", "case", "default", "import", "from", "operator", "signal",
+      "lazy", "watch", "export", "as"
     ];
 
     const LUAU_ATTRIBUTES = [
@@ -97,7 +98,7 @@
 
 
     const LUAU_KEYWORDS = [
-      "and", "break", "continue", "do", "else", "elseif", "end", "export",
+      "and", "break", "continue", "do", "else", "elseif", "end",
       "false", "for", "function", "if", "in", "local", "nil", "not", "or",
       "repeat", "return", "then", "true", "type", "until", "while", "const"
     ];
@@ -396,6 +397,7 @@ end)`;
           /^enum\b/.test(maskedLine) ||
           /^match\b/.test(maskedLine) ||
           /^operator\s+/.test(maskedLine) ||
+          /^watch\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(maskedLine) ||
           /^constructor\s*\(/.test(maskedLine) ||
           /^(get|set)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(maskedLine) ||
           /^defer\s*$/.test(maskedLine) ||
@@ -626,7 +628,7 @@ end)`;
         const endPos = findMatchingEndByLines(source, classIdx);
         const body = source.slice(headerEnd + 1, endPos.start);
         const lines = splitLinesWithOffsets(body);
-        const fields = [], statics = [], methods = [], getters = [], setters = [], operators = [], signals = [];
+        const fields = [], statics = [], methods = [], getters = [], setters = [], operators = [], signals = [], lazyFields = [], watchers = [];
         let ctor = null;
         let attrs = [];
         const declaredNames = new Set();
@@ -671,6 +673,30 @@ end)`;
             operators.push({ name: meta, params, body: body.slice(newline + 1, opEnd.start) });
             li = lines.findIndex(line => line.start > opEnd.end);
             if (li < 0) break;
+            continue;
+          }
+          const watchMatch = text.match(/^watch\s+([A-Za-z_][\w]*)\s*\(([^)]*)\)$/);
+          if (watchMatch) {
+            if (modifiers.size || attrs.length) throw new Error('watch cannot have modifiers or attributes');
+            const [, property, params] = watchMatch;
+            const pieces = params.split(',').map(part => part.trim());
+            if (pieces.length !== 2 || !pieces.every(piece => /^[A-Za-z_][\w]*$/.test(piece)) || pieces[0] === pieces[1]) throw new Error('watch requires (oldValue, newValue)');
+            if (watchers.some(item => item.name === property)) throw new Error(`Duplicate watcher '${property}'`);
+            const start = lines[li].start + raw.indexOf('watch');
+            const finish = findMatchingEndByLines(body, start);
+            const newline = body.indexOf('\n', start);
+            watchers.push({name: property, params, body: body.slice(newline + 1, finish.start)});
+            li = lines.findIndex(line => line.start > finish.end);
+            if (li < 0) break;
+            continue;
+          }
+          const lazyMatch = text.match(/^lazy\s+([A-Za-z_][\w]*)\s*=\s*(.+)$/);
+          if (lazyMatch) {
+            if (modifiers.size || attrs.length) throw new Error('lazy cannot have modifiers or attributes');
+            if (declaredNames.has(lazyMatch[1])) throw new Error(`Duplicate class member '${lazyMatch[1]}'`);
+            declaredNames.add(lazyMatch[1]);
+            lazyFields.push({name: lazyMatch[1], value: lazyMatch[2]});
+            li++;
             continue;
           }
           const signalMatch = text.match(/^signal\s+([A-Za-z_][\w]*)$/);
@@ -739,6 +765,10 @@ end)`;
         const propertyNames = new Set([...getters, ...setters].map(item => item.name));
         for (const field of fields) if (propertyNames.has(field.name)) throw new Error(`Property '${field.name}' conflicts with an instance field`);
         for (const prop of propertyNames) if (declaredNames.has(prop)) throw new Error(`Property '${prop}' conflicts with an existing member`);
+        for (const item of watchers) {
+          if (![...fields, ...lazyFields].some(field => field.name === item.name)) throw new Error(`watch '${item.name}' requires a field or lazy property`);
+          if (propertyNames.has(item.name)) throw new Error(`watch '${item.name}' conflicts with getter/setter`);
+        }
 
         let constructorBody = ctor?.body || "";
         let parentInit = base ? `${base}.__init(self${ctor?.params?.trim() ? ", " + ctor.params.split(",").map(param => param.trim().split(":")[0].trim()).join(", ") : ""})` : "";
@@ -771,20 +801,48 @@ end)`;
         generated += `${name}.__abstract = ${isAbstract}\n${name}.__final = ${isFinal}\n`;
         generated += `${name}.__finalMethods = ${finalMethods}\n`;
         generated += `${name}.__getters = ${getTableMeta}\n${name}.__setters = ${setTableMeta}\n`;
-        generated += `${name}.__index = function(self, key)\n    local getter = ${name}.__getters[key]\n    if getter then return getter(self) end\n    return ${name}[key]\nend\n`;
-        generated += `${name}.__newindex = function(self, key, value)\n    local setter = ${name}.__setters[key]\n    if setter then setter(self, value); return end\n    if ${name}.__getters[key] then error("Cannot assign to read-only property '" .. key .. "'") end\n    rawset(self, key, value)\nend\n`;
+        const inherited = table => base ? `setmetatable({}, {__index = ${base}.${table}})` : '{}';
+        generated += `${name}.__lazy = ${inherited('__lazy')}\n${name}.__watchers = ${inherited('__watchers')}\n${name}.__watchedFields = ${inherited('__watchedFields')}\n`;
+        for (const item of watchers) generated += `${name}.__watchedFields[${JSON.stringify(item.name)}] = true\n`;
+        generated += `${name}.__index = function(self, key)\n` +
+          `    local getter = ${name}.__getters[key]\n    if getter then return getter(self) end\n` +
+          `    local lazy = ${name}.__lazy[key]\n    if lazy then\n` +
+          `        if not self.__lauaInitialized[key] then\n            self.__lauaInitialized[key] = true\n` +
+          `            local ok, value = pcall(lazy, self)\n` +
+          `            if not ok then self.__lauaInitialized[key] = nil; error(value, 0) end\n` +
+          `            self.__lauaValues[key] = value\n        end\n        return self.__lauaValues[key]\n    end\n` +
+          `    if ${name}.__watchedFields[key] then return self.__lauaValues[key] end\n` +
+          `    return ${name}[key]\nend\n`;
+        generated += `${name}.__newindex = function(self, key, value)\n` +
+          `    local setter = ${name}.__setters[key]\n    if setter then setter(self, value); return end\n` +
+          `    if ${name}.__getters[key] then error("Cannot assign to read-only property: " .. key) end\n` +
+          `    if ${name}.__watchedFields[key] or ${name}.__lazy[key] then\n` +
+          `        local oldValue = self.__lauaValues[key]\n` +
+          `        if ${name}.__lazy[key] and not self.__lauaInitialized[key] then self.__lauaInitialized[key] = true end\n` +
+          `        self.__lauaValues[key] = value\n` +
+          `        local watcher = ${name}.__watchers[key]\n` +
+          `        if watcher and oldValue ~= value then watcher(self, oldValue, value) end\n        return\n    end\n` +
+          `    rawset(self, key, value)\nend\n`;
+        for (const item of lazyFields) generated += `${name}.__lazy[${JSON.stringify(item.name)}] = function(self) return ${transpileCore(item.value)} end\n`;
+        for (const item of watchers) {
+          const body = normalizeBlockIndent(transpileCore(base ? replaceSuperReferences(item.body, base) : item.body), '    ');
+          generated += `${name}.__watchers[${JSON.stringify(item.name)}] = function(self, ${item.params})\n${body ? body + '\n' : ''}end\n`;
+        }
         for (const f of statics) generated += `${name}.${f.name} = ${transpileCore(f.value)}\n`;
         const arglist = ctor ? ctor.params : "...";
         generated += `\nfunction ${name}.__init(self${arglist.trim() ? ", " + arglist : ""})\n`;
         if (parentInit) generated += `    ${parentInit}\n`;
-        for (const f of fields) generated += `    self.${f.name} = ${transpileCore(f.value)}\n`;
+        for (const f of fields) {
+          if (watchers.some(item => item.name === f.name)) generated += `    self.__lauaValues[${JSON.stringify(f.name)}] = ${transpileCore(f.value)}\n`;
+          else generated += `    self.${f.name} = ${transpileCore(f.value)}\n`;
+        }
         for (const signalName of signals) generated += `    self.${signalName} = __lauaSignal.new()\n`;
         constructorBody = normalizeBlockIndent(transpileCore(constructorBody), "    ");
         if (constructorBody) generated += constructorBody + "\n";
         generated += "end\n";
         generated += `\n${ctor?.attributes ? ctor.attributes + "\n" : ""}function ${name}.new(...)\n`;
         generated += `    if ${name}.__abstract then error("Cannot instantiate abstract class '${name}'") end\n`;
-        generated += `    local self = setmetatable({}, ${name})\n    ${name}.__init(self, ...)\n    return self\nend\n`;
+        generated += `    local self = setmetatable({__lauaValues = {}, __lauaInitialized = {}}, ${name})\n    ${name}.__init(self, ...)\n    return self\nend\n`;
         for (const member of [...getters, ...setters]) {
           const tableName = getters.includes(member) ? "__getters" : "__setters";
           let memberBody = base ? replaceSuperReferences(member.body, base) : member.body;
@@ -901,23 +959,54 @@ end)`;
 
     // Laua v20: extensions are transformed after class/namespace lowering,
     // so they also work inside generated methods and constructors.
+    function transpileExports(source) {
+      const names = [];
+      const found = new Set();
+      const lines = source.split('\n').map(line => {
+        if (!/^export\s+/.test(maskNonCode(line).trim()) || /^export\s+type\s+/.test(maskNonCode(line).trim())) return line;
+        const match = line.match(/^([ \t]*)export\s+(.+)$/);
+        if (!match) throw new Error('Invalid export statement');
+        const rest = match[2];
+        const declaration = rest.match(/^(?:(?:final|abstract)\s+)?class\s+([A-Za-z_]\w*)|^enum\s+([A-Za-z_]\w*)|^namespace\s+([A-Za-z_]\w*)|^(?:local\s+)?(?:async\s+)?function\s+([A-Za-z_]\w*)|^local\s+([A-Za-z_]\w*)\s*(?::\s*[^=]+)?\s*=/);
+        const name = declaration && declaration.slice(1).find(Boolean);
+        if (!name) throw new Error(`Unsupported export declaration: ${rest}`);
+        if (found.has(name)) throw new Error(`Duplicate export '${name}'`);
+        found.add(name); names.push(name);
+        return match[1] + rest;
+      });
+      return {source: lines.join('\n'), names};
+    }
+
     function transpileImports(source) {
+      let serial = 0;
       return splitLinesWithOffsets(source).map(line => {
-        const text = line.text;
-        if (!/^import\b/.test(maskNonCode(text).trim())) return text;
-        const match = text.match(/^(\s*)import\s+([A-Za-z_][\w]*)\s+from\s+(["'])([^"'\n]+)\3\s*$/);
-        if (!match) throw new Error('Expected import Name from "./Module"');
-        const [, indent, name, , path] = match;
-        if (!path.startsWith('./') && !path.startsWith('../')) throw new Error("Import paths must start with ./ or ../");
-        let rest = path, from = 'script.Parent';
-        while (rest.startsWith('../')) { from += '.Parent'; rest = rest.slice(3); }
+        const raw = line.text;
+        if (!/^import\b/.test(maskNonCode(raw).trim())) return raw;
+        const match = raw.match(/^([ \t]*)import\s+(?:([A-Za-z_]\w*)|\{([^{}]+)\})\s+from\s+(["'])([^"'\n]+)\4\s*$/);
+        if (!match) throw new Error('Expected import Name or import {Name} from "./Module"');
+        const [, indent, name, named, , path] = match;
+        if (!path.startsWith('./') && !path.startsWith('../')) throw new Error('Import paths must start with ./ or ../');
+        let rest = path, target = 'script.Parent';
+        while (rest.startsWith('../')) { target += '.Parent'; rest = rest.slice(3); }
         if (rest.startsWith('./')) rest = rest.slice(2);
-        if (!rest) throw new Error("Import path must name a ModuleScript");
-        for (const segment of rest.split('/')) {
-          if (!/^[A-Za-z_][\w]*$/.test(segment)) throw new Error(`Invalid import segment '${segment}'`);
-          from += `:WaitForChild("${segment}")`;
+        if (!rest) throw new Error('Import path must name a ModuleScript');
+        for (const part of rest.split('/')) {
+          if (!/^[A-Za-z_]\w*$/.test(part)) throw new Error(`Invalid import path segment '${part}'`);
+          target += `:WaitForChild("${part}")`;
         }
-        return `${indent}local ${name} = require(${from})`;
+        if (!named) return `${indent}local ${name} = require(${target})`;
+        const tmp = `__lauaImported${++serial}`;
+        const output = [`${indent}local ${tmp} = require(${target})`];
+        const aliases = new Set();
+        for (const part of named.split(',')) {
+          const m = part.trim().match(/^([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?$/);
+          if (!m) throw new Error(`Invalid named import '${part}'`);
+          const alias = m[2] || m[1];
+          if (aliases.has(alias)) throw new Error(`Duplicate import '${alias}'`);
+          aliases.add(alias);
+          output.push(`${indent}local ${alias} = ${tmp}.${m[1]}`);
+        }
+        return output.join('\n');
       }).join('\n');
     }
 
@@ -941,6 +1030,46 @@ end)`;
         }
         return output.join('\n');
       }).join('\n');
+    }
+
+    function splitPatternFields(text) {
+      const parts = [];
+      const mask = maskNonCode(text);
+      let depth = 0, start = 0;
+      for (let i = 0; i < mask.length; i++) {
+        if (mask[i] === '{') depth++;
+        if (mask[i] === '}') depth--;
+        if (depth < 0) throw new Error('Invalid match table pattern');
+        if (mask[i] === ',' && depth === 0) { parts.push(text.slice(start, i).trim()); start = i + 1; }
+      }
+      if (depth) throw new Error('Unclosed match table pattern');
+      parts.push(text.slice(start).trim());
+      return parts;
+    }
+
+    function matchPatternCondition(value, pattern) {
+      pattern = pattern.trim();
+      if (!pattern.startsWith('{')) return `${value} == ${pattern}`;
+      if (!pattern.endsWith('}')) throw new Error('Unclosed match table pattern');
+      const inside = pattern.slice(1, -1).trim();
+      const parts = [`type(${value}) == "table"`];
+      if (inside) {
+        const used = new Set();
+        for (const part of splitPatternFields(inside)) {
+          const match = part.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+          if (!match) throw new Error(`Invalid table match field '${part}'`);
+          if (used.has(match[1])) throw new Error(`Duplicate match field '${match[1]}'`);
+          used.add(match[1]);
+          parts.push(matchPatternCondition(`${value}.${match[1]}`, match[2]));
+        }
+      }
+      return `(${parts.join(' and ')})`;
+    }
+
+    function matchBranchCondition(value, expression) {
+      const guarded = expression.match(/^(.*?)\s+if\s+(.+)$/);
+      const condition = matchPatternCondition(value, guarded ? guarded[1] : expression);
+      return guarded ? `${condition} and (${guarded[2]})` : condition;
     }
 
     function transpileMatches(source) {
@@ -981,7 +1110,7 @@ end)`;
         const variable = `__lauaMatch${++serial}`;
         const output = ['do', `    local ${variable} = ${subject}`];
         branches.forEach((branch, idx) => {
-          output.push(branch.isDefault ? '    else' : `    ${idx === 0 ? 'if' : 'elseif'} ${variable} == ${branch.value} then`);
+          output.push(branch.isDefault ? '    else' : `    ${idx === 0 ? 'if' : 'elseif'} ${matchBranchCondition(variable, branch.value)} then`);
           const content = normalizeBlockIndent(branch.body.join('\n'), '        ');
           if (content) output.push(content);
         });
@@ -1065,6 +1194,32 @@ end)`;
         const base = source.slice(left, pos).trim();
         source = source.slice(0, left) + `__lauaCore.optional(${base}, "${member[1]}")` + source.slice(pos + 2 + member[1].length);
       }
+    }
+
+    function transpileCoalescingAssign(source) {
+      let serial = 0;
+      return splitLinesWithOffsets(source).map(line => {
+        const raw = line.text;
+        const masked = maskNonCode(raw);
+        const at = masked.indexOf('??=');
+        if (at < 0) return raw;
+        const indent = raw.match(/^[ \t]*/)[0];
+        const left = raw.slice(0, at).trim();
+        const fallback = raw.slice(at + 3).trim();
+        if (!fallback) throw new Error('??= requires a fallback');
+        const endSuffix = fallback.includes('--') ? `\n${indent}end` : ' end';
+        const twoEnds = fallback.includes('--') ? `\n${indent}end end` : ' end end';
+        if (/^[A-Za-z_]\w*$/.test(left)) return `${indent}if ${left} == nil then ${left} = ${fallback}${endSuffix}`;
+        const dot = left.match(/^(.*?)\.([A-Za-z_]\w*)$/);
+        const indexed = left.match(/^(.*?)\[([^\[\]]+)\]$/);
+        if (!dot && !indexed) throw new Error('??= expects a variable, property or indexed target');
+        const receiver = (dot || indexed)[1].trim();
+        if (!receiver) throw new Error('??= receiver cannot be empty');
+        const n = ++serial, tmp = `__lauaAssignTarget${n}`;
+        if (dot) return `${indent}do local ${tmp} = ${receiver}; if ${tmp}.${dot[2]} == nil then ${tmp}.${dot[2]} = ${fallback}${twoEnds}`;
+        const key = `__lauaAssignKey${n}`;
+        return `${indent}do local ${tmp} = ${receiver}; local ${key} = ${indexed[2]}; if ${tmp}[${key}] == nil then ${tmp}[${key}] = ${fallback}${twoEnds}`;
+      }).join('\n');
     }
 
     function transpileCoalescing(source) {
@@ -1216,7 +1371,8 @@ end)`;
     }
 
     function transpile(source, runtimeRequire) {
-      const deferred = transpileDeferFunctions(transpileExtensions(transpileCore(transpileUsing(source))));
+      const exported = transpileExports(source);
+      const deferred = transpileDeferFunctions(transpileExtensions(transpileCore(transpileUsing(transpileCoalescingAssign(exported.source)))));
       const asynchronous = transpileAsyncFunctions(deferred);
       const awaited = transpileAwaits(asynchronous.source);
       if (awaited.count && !asynchronous.count) throw new Error("await requires an async function");
@@ -1225,6 +1381,7 @@ end)`;
         : awaited.source;
       if (output.includes('__lauaCore.')) output = insertLauaRuntimeRequire(output, 'require(script.Parent.LauaCore)').replace('local __lauaAsync = require(script.Parent.LauaCore)', 'local __lauaCore = require(script.Parent.LauaCore)');
       if (output.includes('__lauaSignal.')) output = insertLauaRuntimeRequire(output, 'require(script.Parent.LauaSignal)').replace('local __lauaAsync = require(script.Parent.LauaSignal)', 'local __lauaSignal = require(script.Parent.LauaSignal)');
+      if (exported.names.length) output += `\nreturn {${exported.names.map(name => `${name} = ${name}`).join(', ')}}`;
       return output.split("\n").map(line => line.replace(/[\t ]+$/g, "")).join("\n");
     }
 
@@ -1359,6 +1516,23 @@ end)`;
             }
           }
 
+          const lazyField = trimmed.match(/^lazy\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+          if (lazyField) {
+            instanceMembers[lazyField[1]] = {kind: "field", visibility: "public", detail: "Laua lazy property"};
+            li++;
+            continue;
+          }
+          const watcher = trimmed.match(/^watch\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)$/);
+          if (watcher) {
+            try {
+              const start = lines[li].start + raw.indexOf("watch");
+              const blockEnd = findMatchingEndByLines(body, start);
+              const nextLine = lines.findIndex(line => line.start > blockEnd.end);
+              if (nextLine < 0) break;
+              li = nextLine;
+              continue;
+            } catch { li++; continue; }
+          }
           const fn = trimmed.match(/^(async function|function|get|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*(?::\s*.+)?$/);
           if (fn) {
             const target = isStatic ? staticMembers : instanceMembers;
@@ -2695,13 +2869,16 @@ end)`;
 
 
     const LINT_STATEMENT_KEYWORDS = [
-      "and", "break", "continue", "do", "else", "elseif", "end", "export",
+      "and", "break", "continue", "do", "else", "elseif", "end",
       "for", "function", "if", "in", "local", "not", "or", "repeat", "return",
       "then", "type", "until", "while",
       "class", "extends", "constructor", "private", "public", "protected",
       "static", "new", "namespace", "super", "abstract", "override", "enum",
       "final", "get", "set", "defer", "using", "async", "await",
-      "match", "case", "default", "import", "from", "operator", "signal"
+      "match", "case", "default", "import", "from", "operator", "signal", "lazy", "watch", "export", "as",
+      "lazy", "watch", "as", "export", "lazy", "watch", "export", "as",
+      "lazy", "watch", "as", "export", "lazy", "watch", "export", "as",
+      "lazy", "watch", "as", "export"
     ];
 
     function lintEditDistance(a, b) {
@@ -2854,6 +3031,15 @@ end)`;
         } else if (/^(?:case|default)\b/.test(trimmed)) {
           if (!stack.some(item => item.kind === "match")) issue(lineStart, trimmed.length, "case/default requires a match block");
           if (/^case\s*$/.test(rawLine.trim())) issue(lineStart, 4, "case requires a value");
+        } else if (/^watch\s+/.test(trimmed)) {
+          if (!/^watch\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)/.test(trimmed)) issue(lineStart, trimmed.length, "watch needs a field name and (oldValue, newValue).");
+          add("watch", headerIndex);
+        } else if (/^watch\s+/.test(trimmed)) {
+          if (!/^watch\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)/.test(trimmed)) issue(lineStart, trimmed.length, "watch needs a field name and (oldValue, newValue).");
+          add("watch", headerIndex);
+        } else if (/^watch\s+/.test(trimmed)) {
+          if (!/^watch\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)/.test(trimmed)) issue(lineStart, trimmed.length, "watch needs a field name and (oldValue, newValue).");
+          add("watch", headerIndex);
         } else if (/^operator\b/.test(trimmed)) {
           add("operator", headerIndex);
         } else if (/^namespace\b/.test(trimmed) || /^enum\b/.test(trimmed)) {
@@ -2865,6 +3051,27 @@ end)`;
         } else if (/^defer\b/.test(trimmed)) {
           if (!/^defer\s*$/.test(trimmed)) issue(lineStart, trimmed.length, "Use 'defer' on its own line before its cleanup block.");
           add("defer", headerIndex);
+        } else if (/^lazy\s+/.test(trimmed)) {
+          if (!/^lazy\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+$/.test(trimmed)) issue(lineStart, trimmed.length, "lazy requires a field and an initializer.");
+        } else if (/^export\s+/.test(trimmed)) {
+          if (!/^export\s+(?:(?:abstract|final)\s+)?(?:class|enum|namespace|type|(?:local\s+)?(?:async\s+)?function|local)\b/.test(trimmed)) issue(lineStart, trimmed.length, "Unsupported export declaration.");
+          if (/^export\s+(?:(?:final|abstract)\s+)?class\b/.test(trimmed)) add("class", headerIndex);
+          if (/^export\s+enum\b/.test(trimmed)) add("enum", headerIndex);
+          if (/^export\s+namespace\b/.test(trimmed)) add("namespace", headerIndex);
+        } else if (/^lazy\s+/.test(trimmed)) {
+          if (!/^lazy\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+$/.test(trimmed)) issue(lineStart, trimmed.length, "lazy requires a field and an initializer.");
+        } else if (/^export\s+/.test(trimmed)) {
+          if (!/^export\s+(?:(?:abstract|final)\s+)?(?:class|enum|namespace|type|(?:local\s+)?(?:async\s+)?function|local)\b/.test(trimmed)) issue(lineStart, trimmed.length, "Unsupported export declaration.");
+          if (/^export\s+(?:(?:final|abstract)\s+)?class\b/.test(trimmed)) add("class", headerIndex);
+          if (/^export\s+enum\b/.test(trimmed)) add("enum", headerIndex);
+          if (/^export\s+namespace\b/.test(trimmed)) add("namespace", headerIndex);
+        } else if (/^lazy\s+/.test(trimmed)) {
+          if (!/^lazy\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+$/.test(trimmed)) issue(lineStart, trimmed.length, "lazy requires a field and an initializer.");
+        } else if (/^export\s+/.test(trimmed)) {
+          if (!/^export\s+(?:(?:abstract|final)\s+)?(?:class|enum|namespace|type|(?:local\s+)?(?:async\s+)?function|local)\b/.test(trimmed)) issue(lineStart, trimmed.length, "Unsupported export declaration.");
+          if (/^export\s+(?:(?:final|abstract)\s+)?class\b/.test(trimmed)) add("class", headerIndex);
+          if (/^export\s+enum\b/.test(trimmed)) add("enum", headerIndex);
+          if (/^export\s+namespace\b/.test(trimmed)) add("namespace", headerIndex);
         } else if (/^using\b/.test(trimmed)) {
           if (!/^using\s+[A-Za-z_][A-Za-z0-9_]*\s*=\s*.+$/.test(trimmed)) {
             issue(lineStart, trimmed.length, "using requires: using name = expression");
@@ -3927,7 +4134,7 @@ end)`;
         transpile(source);
       } catch (error) {
         const message = error?.message || String(error);
-        if (/final|getter|setter|property|defer|using|async|await|super|constructor|Invalid member/i.test(message)) {
+        if (/final|getter|setter|property|defer|using|async|await|super|constructor|Invalid member|lazy|watch|export|import|match|\?\?=/i.test(message)) {
           pushMarker(0, Math.max(1, source.length && Math.min(source.length, 5)), monaco.MarkerSeverity.Error, message, "syntax");
         }
       }
@@ -4000,7 +4207,7 @@ end)`;
 
         operators: [
           "+", "-", "*", "/", "//", "%", "^", "#", "==", "~=", "!=", "<=", ">=", "<", ">",
-          "=", "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..", "..=", "::", "->"
+          "=", "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..", "..=", "??=", "::", "->"
         ],
 
         symbols: /[=><!~?:&|+\-*\/\^%#]+/,
@@ -4235,6 +4442,18 @@ end)`;
           }
 
           const keywordDocs = {
+            lazy: "Initialize a class field when first accessed (cached per instance).",
+            watch: "React when a watched field is assigned a different value.",
+            export: "Expose named declarations through the module return table.",
+            as: "Rename a member in a named module import.",
+            lazy: "Initialize a class field when first accessed (cached per instance).",
+            watch: "React when a watched field is assigned a different value.",
+            export: "Expose named declarations through the module return table.",
+            as: "Rename a member in a named module import.",
+            lazy: "Initialize a class field when first accessed (cached per instance).",
+            watch: "React when a watched field is assigned a different value.",
+            export: "Expose named declarations through the module return table.",
+            as: "Rename a member in a named module import.",
             using: "Acquire a resource that is cleaned up at function exit.",
             async: "Create an asynchronous function that returns a promise-like result.",
             await: "Wait for a promise result inside an async function.",
