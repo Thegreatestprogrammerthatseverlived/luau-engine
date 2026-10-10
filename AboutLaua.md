@@ -6,30 +6,53 @@ It adds higher-level language features while still compiling down to normal Luau
 
 Laua currently includes features such as:
 
-- Classes
-- Constructors
-- Inheritance with `extends`
-- Object creation with `new`
-- Parent class access with `super`
-- `public`, `private`, and `protected` access modifiers
-- Static members
-- Abstract classes and methods
-- Method overriding
-- `final` classes and methods
-- Namespaces
-- Enums
-- Asynchronous functions with `async`
-- Asynchronous operations with `await`
-- Automatic resource cleanup with `using`
-- Computed properties with `get` and `set`
-- Deferred cleanup with `defer`
-- Optional chaining with `?.`
-- Nil coalescing with `??`
-- Pattern matching with `match`, `case`, and `default`
-- Table destructuring
-- Module imports with `import`
-- Operator overloading with `operator`
-- Built-in signals with `signal`
+# Classes and object-oriented programming (18)
+- `class`
+- `constructor`
+- `extends`
+- `new`
+- `super`
+- `public`
+- `private`
+- `protected`
+- `static`
+- `abstract`
+- `override`
+- `final`
+- `get`
+- `set`
+- `operator`
+- `lazy`
+- `watch`
+- `signal`
+
+# Code organization (4)
+- `namespace`
+- `enum`
+- `import`
+- `export`
+
+# Control flow (3)
+- `match`
+- `case`
+- `default`
+
+# Asynchronous programming and cleanup (4)
+- `async`
+- `await`
+- `using`
+- `defer`
+
+# Contextual import words
+- `from`
+- `as`
+
+# Additional Laua operators and syntax
+- `?.` — Optional chaining
+- `??` — Nil coalescing
+- `??=` — Nil-coalescing assignment
+- `local { ... } = ...` — Table destructuring
+- `case { ... } if ...` — Pattern matching with guards
 
 Example:
 
