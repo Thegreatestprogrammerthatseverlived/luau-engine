@@ -361,5 +361,3 @@ The exact ModuleScript instance name is case-sensitive. The transpiler returns *
 - Imports and exports are geared toward Roblox ModuleScripts and relative paths.
 - The compiler is a source transformer, **not** a complete Luau parser, type checker, or security boundary. Complex nested expressions may need extra tests.
 - Browser tests are useful, but generated Luau and runtime modules still need execution testing inside Roblox Studio before relying on the compiler for production games.
-
-See [KEYWORDS.md](KEYWORDS.md) for the exact keyword inventory and contextual import words.
