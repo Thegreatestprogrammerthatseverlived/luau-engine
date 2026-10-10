@@ -48,7 +48,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · type/lint directive support</span>
+      <span>pronounced “Lawah” · v20 · 27 custom keywords · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn">Example</button>
@@ -77,7 +77,8 @@
     const LAUA_KEYWORDS = [
       "class", "extends", "constructor", "private", "public", "protected",
       "static", "new", "namespace", "super", "abstract", "override", "enum",
-      "final", "get", "set", "defer", "using", "async", "await"
+      "final", "get", "set", "defer", "using", "async", "await",
+      "match", "case", "default", "import", "from", "operator", "signal"
     ];
 
     const LUAU_ATTRIBUTES = [
@@ -393,6 +394,8 @@ end)`;
           /^(abstract\s+|final\s+)?class\b/.test(maskedLine) ||
           /^namespace\b/.test(maskedLine) ||
           /^enum\b/.test(maskedLine) ||
+          /^match\b/.test(maskedLine) ||
+          /^operator\s+/.test(maskedLine) ||
           /^constructor\s*\(/.test(maskedLine) ||
           /^(get|set)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(maskedLine) ||
           /^defer\s*$/.test(maskedLine) ||
@@ -623,7 +626,7 @@ end)`;
         const endPos = findMatchingEndByLines(source, classIdx);
         const body = source.slice(headerEnd + 1, endPos.start);
         const lines = splitLinesWithOffsets(body);
-        const fields = [], statics = [], methods = [], getters = [], setters = [];
+        const fields = [], statics = [], methods = [], getters = [], setters = [], operators = [], signals = [];
         let ctor = null;
         let attrs = [];
         const declaredNames = new Set();
@@ -649,6 +652,37 @@ end)`;
           const { modifiers, text } = parseLauaModifiers(original);
           const isStatic = modifiers.has("static");
           const methodMatch = text.match(/^(async function|function|get|set)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?::\s*[^=]+)?$/);
+          const operatorMatch = text.match(/^operator\s+([^\s(]+)\s*\(([^)]*)\)\s*$/);
+          if (operatorMatch) {
+            const opMap = {"+":"__add", "-":"__sub", "*":"__mul", "/":"__div", "//":"__idiv", "%":"__mod", "^":"__pow", "..":"__concat", "==":"__eq", "<":"__lt", "<=":"__le", "#":"__len"};
+            const symbol = operatorMatch[1];
+            let meta = opMap[symbol];
+            if (!meta) throw new Error(`Unsupported operator '${symbol}'`);
+            const params = operatorMatch[2].trim();
+            if (symbol === "-" && !params) meta = "__unm";
+            if (["__unm", "__len"].includes(meta) && params) throw new Error(`Unary '${symbol}' takes no parameters`);
+            if (!["__unm", "__len"].includes(meta) && !/^[A-Za-z_][\w]*(?:\s*:\s*[\w ?]+)?$/.test(params)) throw new Error("Binary operator requires one parameter");
+            if (modifiers.size) throw new Error("Operators cannot have modifiers");
+            if (declaredNames.has(meta)) throw new Error(`Duplicate operator '${symbol}'`);
+            declaredNames.add(meta);
+            const opStart = lines[li].start + raw.indexOf("operator");
+            const opEnd = findMatchingEndByLines(body, opStart);
+            const newline = body.indexOf("\n", opStart);
+            operators.push({ name: meta, params, body: body.slice(newline + 1, opEnd.start) });
+            li = lines.findIndex(line => line.start > opEnd.end);
+            if (li < 0) break;
+            continue;
+          }
+          const signalMatch = text.match(/^signal\s+([A-Za-z_][\w]*)$/);
+          if (signalMatch) {
+            const signalName = signalMatch[1];
+            if (modifiers.size) throw new Error("Signals cannot have modifiers");
+            if (declaredNames.has(signalName)) throw new Error(`Duplicate member '${signalName}'`);
+            declaredNames.add(signalName);
+            signals.push(signalName);
+            li++;
+            continue;
+          }
           const constructorMatch = text.match(/^constructor\s*\(([^)]*)\)\s*$/);
           if (constructorMatch || methodMatch) {
             const kind = constructorMatch ? "constructor" : methodMatch[1];
@@ -744,6 +778,7 @@ end)`;
         generated += `\nfunction ${name}.__init(self${arglist.trim() ? ", " + arglist : ""})\n`;
         if (parentInit) generated += `    ${parentInit}\n`;
         for (const f of fields) generated += `    self.${f.name} = ${transpileCore(f.value)}\n`;
+        for (const signalName of signals) generated += `    self.${signalName} = __lauaSignal.new()\n`;
         constructorBody = normalizeBlockIndent(transpileCore(constructorBody), "    ");
         if (constructorBody) generated += constructorBody + "\n";
         generated += "end\n";
@@ -758,6 +793,10 @@ end)`;
           generated += `\n${member.attributes ? member.attributes + "\n" : ""}${name}.${tableName}.${member.name} = function(self${member.params.trim() ? ", " + member.params : ""})\n`;
           if (memberBody) generated += memberBody + "\n";
           generated += "end\n";
+        }
+        for (const op of operators) {
+          const body = normalizeBlockIndent(transpileCore(base ? replaceSuperReferences(op.body, base) : op.body), "    ");
+          generated += `\nfunction ${name}.${op.name}(self${op.params ? ", " + op.params : ""})\n${body ? body + "\n" : ""}end\n`;
         }
         for (const member of methods) {
           if (base) generated += `\nif ${base}.__finalMethods and ${base}.__finalMethods[${JSON.stringify(member.name)}] then error("Cannot override final method '${member.name}'") end\n`;
@@ -859,14 +898,222 @@ end)`;
       return source;
     }
 
-    function transpileUsing(source) {
+
+    // Laua v20: extensions are transformed after class/namespace lowering,
+    // so they also work inside generated methods and constructors.
+    function transpileImports(source) {
       return splitLinesWithOffsets(source).map(line => {
         const text = line.text;
-        if (!/^using\b/.test(maskNonCode(text).trim())) return text;
-        const match = text.match(/^(\s*)using\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+        if (!/^import\b/.test(maskNonCode(text).trim())) return text;
+        const match = text.match(/^(\s*)import\s+([A-Za-z_][\w]*)\s+from\s+(["'])([^"'\n]+)\3\s*$/);
+        if (!match) throw new Error('Expected import Name from "./Module"');
+        const [, indent, name, , path] = match;
+        if (!path.startsWith('./') && !path.startsWith('../')) throw new Error("Import paths must start with ./ or ../");
+        let rest = path, from = 'script.Parent';
+        while (rest.startsWith('../')) { from += '.Parent'; rest = rest.slice(3); }
+        if (rest.startsWith('./')) rest = rest.slice(2);
+        if (!rest) throw new Error("Import path must name a ModuleScript");
+        for (const segment of rest.split('/')) {
+          if (!/^[A-Za-z_][\w]*$/.test(segment)) throw new Error(`Invalid import segment '${segment}'`);
+          from += `:WaitForChild("${segment}")`;
+        }
+        return `${indent}local ${name} = require(${from})`;
+      }).join('\n');
+    }
+
+    function transpileDestructuring(source) {
+      let id = 0;
+      return splitLinesWithOffsets(source).map(line => {
+        const raw = line.text;
+        if (!/^local\s*\{/.test(maskNonCode(raw).trim())) return raw;
+        const match = raw.match(/^(\s*)local\s*\{([^{}]+)\}\s*=\s*(.+?)\s*$/);
+        if (!match) throw new Error("Expected local {a, b} = tableExpression");
+        const [, indent, names, expression] = match;
+        const tmp = `__lauaDestructure${++id}`;
+        const output = [`${indent}local ${tmp} = ${expression}`], seen = new Set();
+        for (const part of names.split(',')) {
+          const item = part.trim().match(/^([A-Za-z_][\w]*)(?:\s*:\s*([A-Za-z_][\w]*))?$/);
+          if (!item) throw new Error(`Invalid destructured member '${part}'`);
+          const [, key, alias] = item, name = alias || key;
+          if (seen.has(name)) throw new Error(`Duplicate destructured name '${name}'`);
+          seen.add(name);
+          output.push(`${indent}local ${name} = ${tmp}.${key}`);
+        }
+        return output.join('\n');
+      }).join('\n');
+    }
+
+    function transpileMatches(source) {
+      let serial = 0;
+      while (true) {
+        const masked = maskNonCode(source);
+        const candidates = [...masked.matchAll(/\bmatch\b/g)]
+          .map(m => m.index)
+          .filter(pos => masked.slice(masked.lastIndexOf('\n', pos - 1) + 1, pos).trim() === '');
+        if (!candidates.length) return source;
+        const at = candidates[candidates.length - 1];
+        const headerEnd = source.indexOf('\n', at);
+        if (headerEnd < 0) throw new Error('match needs cases');
+        const subject = source.slice(at + 5, headerEnd).trim();
+        if (!subject) throw new Error('match requires an expression');
+        const closing = findMatchingEndByLines(source, at);
+        const body = source.slice(headerEnd + 1, closing.start);
+        const branches = [];
+        let active = null, depth = 0;
+        for (const line of splitLinesWithOffsets(body)) {
+          const code = maskNonCode(line.text).trim();
+          const raw = line.text.trim();
+          const caseMatch = raw.match(/^case\s+(.+)$/);
+          const isDefault = /^default\s*$/.test(code);
+          if (depth === 0 && (/^case\b/.test(code) || isDefault)) {
+            if (/^case\b/.test(code) && !caseMatch) throw new Error('case requires a value');
+            if (isDefault && !branches.length) throw new Error('default must follow case');
+            if (active?.isDefault) throw new Error('Cannot place a branch after default');
+            active = { value: caseMatch?.[1], isDefault, body: [] };
+            branches.push(active);
+          } else if (active) active.body.push(line.text);
+          else if (code) throw new Error('match expects case or default');
+          const opens = /^(?:if\b.*\bthen\s*$|for\b.*\bdo\s*$|while\b.*\bdo\s*$|do\s*$|repeat\s*$|(?:local\s+)?(?:async\s+)?function\b|match\b)/.test(code);
+          if (opens) depth++;
+          if (/^(?:end\s*$|until\b)/.test(code)) depth--;
+        }
+        if (!branches.length) throw new Error('match requires a case');
+        const variable = `__lauaMatch${++serial}`;
+        const output = ['do', `    local ${variable} = ${subject}`];
+        branches.forEach((branch, idx) => {
+          output.push(branch.isDefault ? '    else' : `    ${idx === 0 ? 'if' : 'elseif'} ${variable} == ${branch.value} then`);
+          const content = normalizeBlockIndent(branch.body.join('\n'), '        ');
+          if (content) output.push(content);
+        });
+        output.push('    end', 'end');
+        source = source.slice(0, at) + output.join('\n') + source.slice(closing.end);
+      }
+    }
+
+    function lauLeft(masked, end) {
+      let i = end;
+      while (i >= 0 && /[ \t]/.test(masked[i])) i--;
+      if (i < 0) return -1;
+      if (masked[i] === ')' || masked[i] === ']') {
+        const close = masked[i], open = close === ')' ? '(' : '[';
+        let depth = 1;
+        for (i--; i >= 0; i--) {
+          if (masked[i] === close) depth++;
+          if (masked[i] === open && --depth === 0) break;
+        }
+        if (i < 0) return -1;
+        let prev = i - 1;
+        while (prev >= 0 && /[ \t]/.test(masked[prev])) prev--;
+        return prev >= 0 && /[\w]/.test(masked[prev]) ? lauLeft(masked, prev) : i;
+      }
+      if (!/[\w]/.test(masked[i])) return -1;
+      while (i >= 0 && /[\w]/.test(masked[i])) i--;
+      return i >= 0 && (masked[i] === '.' || masked[i] === ':') ? lauLeft(masked, i - 1) : i + 1;
+    }
+
+    function lauRight(source, from) {
+      let i = from;
+      while (/[ \t]/.test(source[i] || '') && i < source.length) i++;
+      const first = source[i];
+      if (first === '"' || first === "'") {
+        const quote = first;
+        i++;
+        while (i < source.length) {
+          if (source[i] === '\\') i += 2;
+          else if (source[i++] === quote) break;
+        }
+      } else if (first === '(') {
+        let depth = 1; i++;
+        while (i < source.length && depth) {
+          if (source[i] === '(') depth++;
+          else if (source[i] === ')') depth--;
+          i++;
+        }
+        if (depth) return -1;
+      } else {
+        const m = /^(?:[A-Za-z_][\w]*|-?[\d.]+)/.exec(source.slice(i));
+        if (!m) return -1;
+        i += m[0].length;
+      }
+      while (i < source.length) {
+        const rest = source.slice(i), spaces = /^[ \t]*/.exec(rest)[0];
+        const field = /^[.:]([A-Za-z_][\w]*)/.exec(rest.slice(spaces.length));
+        if (field) i += spaces.length + field[0].length;
+        else if (rest[spaces.length] === '(') {
+          i += spaces.length;
+          let depth = 0;
+          do {
+            if (source[i] === '(') depth++;
+            if (source[i] === ')') depth--;
+            i++;
+          } while (i < source.length && depth);
+          if (depth) return -1;
+        } else break;
+      }
+      return i - 1;
+    }
+
+    function transpileOptional(source) {
+      while (true) {
+        const masked = maskNonCode(source), pos = masked.indexOf('?.');
+        if (pos < 0) return source;
+        const left = lauLeft(masked, pos - 1);
+        const member = /^([A-Za-z_][\w]*)/.exec(masked.slice(pos + 2));
+        if (left < 0 || !member) throw new Error('Optional chaining expects value?.property');
+        const suffix = source.slice(pos + 2 + member[1].length).trimStart();
+        if (suffix.startsWith('(') || suffix.startsWith('[')) throw new Error('Optional calls/indexing are not supported: use ?.property only');
+        const base = source.slice(left, pos).trim();
+        source = source.slice(0, left) + `__lauaCore.optional(${base}, "${member[1]}")` + source.slice(pos + 2 + member[1].length);
+      }
+    }
+
+    function transpileCoalescing(source) {
+      while (true) {
+        const masked = maskNonCode(source), pos = masked.lastIndexOf('??');
+        if (pos < 0) return source;
+        const left = lauLeft(masked, pos - 1), right = lauRight(source, pos + 2);
+        if (left < 0 || right < 0) throw new Error('Nil coalescing expects left ?? fallback');
+        const before = masked.slice(Math.max(0, left - 8), left).trim();
+        const after = (masked.slice(right + 1).split('\n')[0] || '').trim();
+        if (/[+\-*/%^<>~&|]$/.test(before) || /\b(?:and|or)$/.test(before)) throw new Error('Wrap compound ?? left operands in parentheses');
+        if (/^[+\-*/%^<>=~&|]/.test(after) || /^\.\./.test(after) || /^(?:and|or)\b/.test(after)) throw new Error('Wrap compound ?? fallbacks in parentheses');
+        const a = source.slice(left, pos).trim(), b = source.slice(pos + 2, right + 1).trim();
+        source = source.slice(0, left) + `__lauaCore.coalesce(${a}, function() return ${b} end)` + source.slice(right + 1);
+      }
+    }
+
+    function transpileExtensions(source) {
+      source = transpileImports(source);
+      source = transpileDestructuring(source);
+      source = transpileMatches(source);
+      source = transpileOptional(source);
+      source = transpileCoalescing(source);
+      return source;
+    }
+
+    function transpileUsing(source) {
+      const lines = splitLinesWithOffsets(source);
+      const results = [];
+      function delimiterDepth(expr) {
+        let depth = 0;
+        for (const ch of maskNonCode(expr)) {
+          if ('([{'.includes(ch)) depth++;
+          if (')]}'.includes(ch)) depth--;
+        }
+        return depth;
+      }
+      for (let i = 0; i < lines.length; i++) {
+        const text = lines[i].text;
+        if (!/^using\b/.test(maskNonCode(text).trim())) { results.push(text); continue; }
+        const match = text.match(/^([ \t]*)using\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
         if (!match) throw new Error("using requires one resource: using name = expression");
-        const [, indent, name, expression] = match;
-        return [
+        const [, indent, name] = match;
+        let expression = match[3];
+        while (delimiterDepth(expression) > 0 && i + 1 < lines.length) {
+          expression += '\n' + lines[++i].text;
+        }
+        if (delimiterDepth(expression) !== 0) throw new Error('Unclosed using resource expression');
+        results.push([
           `${indent}local ${name} = ${expression}`,
           `${indent}defer`,
           `${indent}    if ${name} ~= nil then`,
@@ -889,8 +1136,9 @@ end)`;
           `${indent}        end`,
           `${indent}    end`,
           `${indent}end`
-        ].join("\n");
-      }).join("\n");
+        ].join("\n"));
+      }
+      return results.join("\n");
     }
 
     function transpileAsyncFunctions(source) {
@@ -968,13 +1216,15 @@ end)`;
     }
 
     function transpile(source, runtimeRequire) {
-      const deferred = transpileDeferFunctions(transpileCore(transpileUsing(source)));
+      const deferred = transpileDeferFunctions(transpileExtensions(transpileCore(transpileUsing(source))));
       const asynchronous = transpileAsyncFunctions(deferred);
       const awaited = transpileAwaits(asynchronous.source);
       if (awaited.count && !asynchronous.count) throw new Error("await requires an async function");
-      const output = (asynchronous.count || awaited.count)
+      let output = (asynchronous.count || awaited.count)
         ? insertLauaRuntimeRequire(awaited.source, runtimeRequire)
         : awaited.source;
+      if (output.includes('__lauaCore.')) output = insertLauaRuntimeRequire(output, 'require(script.Parent.LauaCore)').replace('local __lauaAsync = require(script.Parent.LauaCore)', 'local __lauaCore = require(script.Parent.LauaCore)');
+      if (output.includes('__lauaSignal.')) output = insertLauaRuntimeRequire(output, 'require(script.Parent.LauaSignal)').replace('local __lauaAsync = require(script.Parent.LauaSignal)', 'local __lauaSignal = require(script.Parent.LauaSignal)');
       return output.split("\n").map(line => line.replace(/[\t ]+$/g, "")).join("\n");
     }
 
@@ -1039,6 +1289,12 @@ end)`;
             }
           }
 
+          const signal = trimmed.match(/^signal\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+          if (signal) {
+            instanceMembers[signal[1]] = { kind: "field", visibility: "public", detail: "Laua instance signal" };
+            li++;
+            continue;
+          }
           const field = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=]+)?\s*=\s*(.+)$/);
           if (field && !trimmed.startsWith("local ")) {
             members[field[1]] = {
@@ -1414,7 +1670,14 @@ end)`;
       super: "Accesses the parent class. super(...) calls the parent constructor and super:Method(...) calls a parent method.",
       abstract: "Declares a class or method that cannot be used directly until required methods are implemented.",
       override: "Marks a method as replacing a method inherited from the parent class.",
-      enum: "Declares a frozen set of named values."
+      enum: "Declares a frozen set of named values.",
+      match: "Value matching statement. Use case Value and optional default, ending in end.",
+      case: "Branch of a match statement using == comparison.",
+      default: "Fallback branch of match.",
+      import: "Import a Roblox ModuleScript relative to this script using import Name from \"./Path\".",
+      from: "Introduces the relative ModuleScript path in an import.",
+      operator: "Declare a class metamethod: operator +(other) ... end.",
+      signal: "Declare a per-instance BindableEvent-backed signal.",
     };
 
 
@@ -2437,7 +2700,8 @@ end)`;
       "then", "type", "until", "while",
       "class", "extends", "constructor", "private", "public", "protected",
       "static", "new", "namespace", "super", "abstract", "override", "enum",
-      "final", "get", "set", "defer", "using", "async", "await"
+      "final", "get", "set", "defer", "using", "async", "await",
+      "match", "case", "default", "import", "from", "operator", "signal"
     ];
 
     function lintEditDistance(a, b) {
@@ -2491,6 +2755,8 @@ end)`;
 
     function lintLuauStatementSyntax(source, maskedSource, pushMarker) {
       const maskedLines = maskedSource.split("\n");
+      const sourceLines = source.split("\n");
+      let sourceLineIndex = 0;
       const stack = [];
       let offset = 0;
 
@@ -2527,6 +2793,7 @@ end)`;
       }
 
       for (const line of maskedLines) {
+        const rawLine = sourceLines[sourceLineIndex++] || "";
         const trimmed = line.trim();
         const firstIndex = line.search(/\S/);
         const lineStart = offset + Math.max(0, firstIndex);
@@ -2535,7 +2802,7 @@ end)`;
         if (!trimmed || trimmed.startsWith("--!") || trimmed.startsWith("@")) continue;
 
         const bare = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*(?:[.:][A-Za-z_][A-Za-z0-9_]*)*)\s*;?$/);
-        if (bare && !["break", "continue", "else", "end", "repeat", "do", "defer"].includes(bare[1])) {
+        if (bare && !["break", "continue", "else", "end", "repeat", "do", "defer", "case", "default"].includes(bare[1])) {
           const name = bare[1].split(/[.:]/)[0];
           const guess = nearestLintKeyword(name);
           issue(lineStart, bare[1].length,
@@ -2581,6 +2848,14 @@ end)`;
             issue(lineStart, trimmed.length, "Class declaration needs a class name.");
           }
           add("class", headerIndex);
+        } else if (/^match\b/.test(trimmed)) {
+          if (!/^match\s+\S/.test(trimmed)) issue(lineStart, trimmed.length, "match requires an expression");
+          add("match", headerIndex);
+        } else if (/^(?:case|default)\b/.test(trimmed)) {
+          if (!stack.some(item => item.kind === "match")) issue(lineStart, trimmed.length, "case/default requires a match block");
+          if (/^case\s*$/.test(rawLine.trim())) issue(lineStart, 4, "case requires a value");
+        } else if (/^operator\b/.test(trimmed)) {
+          add("operator", headerIndex);
         } else if (/^namespace\b/.test(trimmed) || /^enum\b/.test(trimmed)) {
           const kind = /^namespace\b/.test(trimmed) ? "namespace" : "enum";
           if (!new RegExp(`^${kind}\\s+[A-Za-z_][A-Za-z0-9_]*`).test(trimmed)) {
@@ -3755,6 +4030,7 @@ end)`;
               ["keyword.laua", "", "@brackets"]],
             [/\b(public|private|protected|static|override|abstract|extends|new|super)\b/, "keyword.laua"],
 
+            [/\?\.|\?\?/, "operator"],
             [/([.:])([A-Za-z_][A-Za-z0-9_]*)/, [
               "delimiter",
               "member"
@@ -3885,13 +4161,13 @@ end)`;
         ],
 
         indentationRules: {
-          increaseIndentPattern: /^\s*(?:(?:abstract\s+)?class\b|namespace\b|enum\b|constructor\s*\(|(?:public\s+|private\s+|protected\s+|static\s+|override\s+|abstract\s+)*function\b|local\s+function\b|function\b|if\b.*\bthen\s*$|for\b.*\bdo\s*$|while\b.*\bdo\s*$|do\s*$|repeat\s*$)/,
+          increaseIndentPattern: /^\s*(?:(?:abstract\s+)?class\b|namespace\b|enum\b|match\b|operator\s+|constructor\s*\(|(?:public\s+|private\s+|protected\s+|static\s+|override\s+|abstract\s+)*function\b|local\s+function\b|function\b|if\b.*\bthen\s*$|for\b.*\bdo\s*$|while\b.*\bdo\s*$|do\s*$|repeat\s*$)/,
           decreaseIndentPattern: /^\s*(?:end\b|until\b|else\b|elseif\b)/
         },
 
         onEnterRules: [
           {
-            beforeText: /^\s*(?:(?:abstract\s+)?class\b|namespace\b|enum\b|constructor\s*\(|(?:public\s+|private\s+|protected\s+|static\s+|override\s+|abstract\s+)*function\b|local\s+function\b|function\b|if\b.*\bthen\s*$|for\b.*\bdo\s*$|while\b.*\bdo\s*$|do\s*$|repeat\s*$)/,
+            beforeText: /^\s*(?:(?:abstract\s+)?class\b|namespace\b|enum\b|match\b|operator\s+|constructor\s*\(|(?:public\s+|private\s+|protected\s+|static\s+|override\s+|abstract\s+)*function\b|local\s+function\b|function\b|if\b.*\bthen\s*$|for\b.*\bdo\s*$|while\b.*\bdo\s*$|do\s*$|repeat\s*$)/,
             action: { indentAction: monaco.languages.IndentAction.Indent }
           },
           {
