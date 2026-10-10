@@ -1,6 +1,6 @@
-# Laua custom syntax reference — v3.5
+# Laua custom syntax reference — v3.7
 
-This document covers **syntax added by Laua beyond ordinary Luau**. It reflects the v3.5 Luau ModuleScript transpiler. The [complete list of 29 Laua keywords](KEYWORDS.md) is available separately, with contextual `from`/`as` explained there. Standard Luau syntax, `--!` directives, and built-in `@` attributes are outside the scope of this document.
+This document covers **syntax added by Laua beyond ordinary Luau**. It reflects the v3.7 Luau ModuleScript transpiler. AboutLaua.md is available separately, with contextual `from`/`as` explained there. Standard Luau syntax, `--!` directives, and built-in `@` attributes are outside the scope of this document.
 
 ## Quick example
 
@@ -361,3 +361,126 @@ The exact ModuleScript instance name is case-sensitive. The transpiler returns *
 - Imports and exports are geared toward Roblox ModuleScripts and relative paths.
 - The compiler is a source transformer, **not** a complete Luau parser, type checker, or security boundary. Complex nested expressions may need extra tests.
 - Browser tests are useful, but generated Luau and runtime modules still need execution testing inside Roblox Studio before relying on the compiler for production games.
+
+See [KEYWORDS.md](KEYWORDS.md) for the exact keyword inventory and contextual import words.
+
+---
+
+## v22 community proposals: status and exact syntax
+
+The following requests were selected after reviewing community feature suggestions for Luau. **This is a staged release.** Working syntax is identified separately from syntax still under design. All earlier Laua keywords remain available.
+
+### A. Shorter functions — implemented (one expression)
+
+```luau
+local double = (x) => x * 2
+local enabled = () => true
+```
+
+This form transpiles to an ordinary anonymous function returning the expression. Multi-statement arrow bodies are not supported. Avoid using this syntax inside strings, comments, or complex nested same-line expressions; the preview matcher is intentionally conservative.
+
+### B. Table spreading — implemented (spread-only literals)
+
+```luau
+local combined = {...first, ...second}
+```
+
+Arrays from `first` and `second` are appended in order; string/dictionary keys are merged, with later inputs winning on duplicate keys. Input expressions must be simple table variables or property paths. Mixed `{item, ...other}` literals and arbitrary expressions are not yet supported. Native Luau `{...}` remains untouched.
+
+### C. Labeled loops — proposed, not implemented
+
+```luau
+outer: for i = 1, 10 do
+    for j = 1, 10 do
+        if j == 3 then break outer end
+    end
+end
+```
+
+An `outer` label would allow breaking or continuing the named loop. Laua cannot safely implement this by simply replacing `break` with `error()` or wrapping the loop in a closure: `return`, yielding, and variable scopes would change. An actual control-flow transformation is required. The preview rejects these statements explicitly.
+
+### D. Slicing strings and buffers — implemented (simple receivers)
+
+```luau
+local greeting = text[1:5]
+local tail = text[-3:-1]
+local packet = data[2:8]
+```
+
+Bounds are 1-based and inclusive. Negative numbers count from the end. `text` must be a string; `data` may be a buffer. Buffer slices allocate a new buffer. Dynamic bound expressions and call-chain receivers are future work.
+
+### E. Scoped lint suppression — implemented in playground
+
+```luau
+@nolint("UnusedLocal")
+local unused = 5
+```
+
+Targets the next nonblank statement, not the entire script. Multiple unrelated warnings must be handled individually. It does not suppress syntax errors or type errors. The compiler strips the marker after linting rather than forwarding it as a normal Luau attribute.
+
+### F. Restricted generics — proposed, not implemented
+
+```luau
+function Spawn<T: Entity>(entity: T)
+    return entity
+end
+```
+
+`T` would be constrained to `Entity` or its subclasses. Deleting the constraint during transpilation would lose the safety guarantee, so the current compiler refuses this form. A Laua type checker or proper Luau type-system integration is required.
+
+### G. Unique / nominal types — proposed, not implemented
+
+```luau
+unique type PlayerId = number
+unique type PlaceId = number
+```
+
+These would be distinct even though both wrap numbers. Simply emitting `type PlayerId = number` would destroy nominal identity. Laua needs a type-checker implementation or an explicitly agreed runtime boxed-value representation before this can be considered supported.
+
+### H. Truthy / falsy types — proposed, not implemented
+
+```luau
+type Truthy = truthy
+type Falsy = falsy
+```
+
+`falsy` means `false | nil` (already expressible in regular Luau). `truthy` would exclude both `false` and `nil`, and cannot be represented accurately by the present simple source transformer. The preview rejects the new aliases rather than outputting false type guarantees.
+
+### I. Table helpers — implemented (arrays)
+
+```luau
+local selected = table.filter(items, function(item) return item.Enabled end)
+local names = table.map(items, function(item) return item.Name end)
+local amount = table.reduce(items, function(sum, item) return sum + item.Amount end, 0)
+local first = table.findWhere(items, function(item) return item.Name == "A" end)
+```
+
+Functions use array indices starting at 1. The predicate/mapping callbacks receive `(value, index)` and reducer callbacks receive `(accumulator, value, index)`. The generated code calls `LauaCore.table` without changing Roblox's built-in `table` library.
+
+### J. Cyclic imports — partially supported (lazy imports)
+
+```luau
+import lazy Registry from "./Registry"
+```
+
+The proxy resolves the module only when accessed. This can avoid some initialization cycles, but cannot guarantee safety if a module needs the other module's value before initialization completes. Avoid eager cross-module reads during startup.
+
+### K. Typed positional table properties — proposed, not implemented
+
+```luau
+type Result = [number, string]
+```
+
+This would require the first array position to contain a number and the second a string. Converting this to `{number | string}` would lose positional checking; the preview deliberately does not make that conversion.
+
+### L. Full regular expressions — proposed, not implemented
+
+```luau
+local found = regex.match(text, "(cat|dog)+")
+```
+
+Luau's built-in patterns are not full regular expressions. A real regex engine (with documented limits for patterns, lookarounds, captures, and performance) is needed. The preview does not pretend `string.match` has equivalent semantics.
+
+### Verification and limitations
+
+This v22 preview extends the source transformer without replacing it with a full parser or type checker. Supported examples compile in both the Luau transformer and the JavaScript playground preview, but only the JavaScript checks could be executed in this environment. Actual Luau runtime behavior still requires Roblox Studio verification.
