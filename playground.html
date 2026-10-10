@@ -21,6 +21,8 @@
       padding: 8px 13px; cursor: pointer; font-weight: 600;
     }
     button:hover { background: #2b3342; }
+    .mode-label { display:flex; align-items:center; gap:6px; font-size:12px; color:#cbd5e1; }
+    select { background:#232936; border:1px solid #343b49; border-radius:7px; color:#f4f4f5; padding:7px; }
     button:disabled { opacity: .55; cursor: not-allowed; }
     #transpileBtn { background: #2563eb; border-color: #2563eb; }
     #transpileBtn:hover { background: #1d4ed8; }
@@ -37,6 +39,9 @@
       height: 30px; display: flex; align-items: center; padding: 0 12px;
       border-top: 1px solid #2a2f3a; background: #151922; color: #94a3b8; font-size: 12px;
     }
+    dialog { width:min(950px,94vw); max-height:85vh; background:#161b26; border:1px solid #3a4557; border-radius:12px; color:#e5e7eb; }
+    dialog::backdrop { background:rgba(0,0,0,.7); }
+    #diffResult { max-height:65vh; overflow:auto; background:#0c1018; padding:14px; font-size:12px; white-space:pre; line-height:1.5; }
     .ok { color: #86efac !important; }
     .error { color: #fca5a5 !important; }
     @media (max-width: 850px) {
@@ -51,13 +56,24 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.8 · live lint</span>
+      <span>pronounced “Lawah” · v3.9 · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn">Example</button>
       <button id="clearBtn">Clear</button>
       <button id="lintBtn">Lint</button>
+      <label class="mode-label" for="modeSelect">Mode
+        <select id="modeSelect" aria-label="Laua compile mode">
+          <option value="Development">Development</option>
+          <option value="Release">Release</option>
+          <option value="Debug">Debug</option>
+        </select>
+      </label>
       <button id="transpileBtn">Transpile</button>
+      <button id="testsBtn" title="Run compiler regression tests">Tests</button>
+      <button id="diffBtn" title="Compare the last two generated outputs">Output Diff</button>
+      <button id="docsBtn" title="Generate reference documentation from Laua declarations">Docs</button>
+      <button id="exportBtn" title="Export generated Luau">Export Luau</button>
       <button id="copyBtn" title="Copy generated Luau code">Copy Luau</button>
     </div>
   </header>
@@ -75,6 +91,13 @@
   </main>
 
   <div id="status">Ready.</div>
+  <dialog id="diffDialog" aria-label="Generated output differences">
+    <div style="display:flex;gap:14px;align-items:center;justify-content:space-between">
+      <strong>Generated Luau changes</strong>
+      <button id="closeDiffBtn">Close</button>
+    </div>
+    <pre id="diffResult"></pre>
+  </dialog>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
   <script>
@@ -83,7 +106,7 @@
       "static", "new", "namespace", "super", "abstract", "override", "enum",
       "final", "get", "set", "defer", "using", "async", "await",
       "match", "case", "default", "import", "from", "operator", "signal",
-      "lazy", "watch", "export", "as"
+      "lazy", "watch", "export", "as", "memo", "is"
     ];
 
     const LUAU_ATTRIBUTES = [
@@ -713,13 +736,21 @@ local part = message[1:7]`;
             li++;
             continue;
           }
-          const signalMatch = text.match(/^signal\s+([A-Za-z_][\w]*)$/);
+          const signalMatch = text.match(/^signal\s+([A-Za-z_][\w]*)(?:\(([^)]*)\))?$/);
           if (signalMatch) {
             const signalName = signalMatch[1];
             if (modifiers.size) throw new Error("Signals cannot have modifiers");
             if (declaredNames.has(signalName)) throw new Error(`Duplicate member '${signalName}'`);
             declaredNames.add(signalName);
-            signals.push(signalName);
+            const types=[];
+            if (signalMatch[2]?.trim()) {
+              for (const part of signalMatch[2].split(',')) {
+                const typed=/^\s*[A-Za-z_]\w*\s*:\s*([A-Za-z_]\w*\??)\s*$/.exec(part);
+                if (!typed) throw new Error('Signals require typed named parameters');
+                types.push(typed[1]);
+              }
+            }
+            signals.push({name:signalName,types});
             li++;
             continue;
           }
@@ -850,7 +881,7 @@ local part = message[1:7]`;
           if (watchers.some(item => item.name === f.name)) generated += `    self.__lauaValues[${JSON.stringify(f.name)}] = ${transpileCore(f.value)}\n`;
           else generated += `    self.${f.name} = ${transpileCore(f.value)}\n`;
         }
-        for (const signalName of signals) generated += `    self.${signalName} = __lauaSignal.new()\n`;
+        for (const item of signals) generated += `    self.${item.name} = __lauaSignal.new(${item.types.length?'{' + item.types.map(t=>JSON.stringify(t)).join(', ') + '}':''})\n`;
         constructorBody = normalizeBlockIndent(transpileCore(constructorBody), "    ");
         if (constructorBody) generated += constructorBody + "\n";
         generated += "end\n";
@@ -1202,9 +1233,42 @@ local part = message[1:7]`;
         if (pos < 0) return source;
         const left = lauLeft(masked, pos - 1);
         const member = /^([A-Za-z_][\w]*)/.exec(masked.slice(pos + 2));
-        if (left < 0 || !member) throw new Error('Optional chaining expects value?.property');
-        const suffix = source.slice(pos + 2 + member[1].length).trimStart();
-        if (suffix.startsWith('(') || suffix.startsWith('[')) throw new Error('Optional calls/indexing are not supported: use ?.property only');
+        if (left < 0) throw new Error('Optional chaining expects receiver');
+        if (masked[pos+2]==='[') {
+          let depth=1,closing=-1;
+          for(let i=pos+3;i<masked.length;i++){
+            if(masked[i]==='[')depth++;
+            if(masked[i]===']')depth--;
+            if(depth===0){closing=i;break;}
+          }
+          if(closing<0)throw new Error('Unclosed optional index');
+          const key=source.slice(pos+3,closing).trim();
+          if(!key)throw new Error('Optional index requires a key');
+          const receiver=source.slice(left,pos).trim();
+          source=source.slice(0,left)+`__lauaCore.optionalIndex(${receiver}, function() return ${key} end)`+source.slice(closing+1);
+          continue;
+        }
+        const colon=masked[pos+2]===':';
+        const name=colon ? /^([A-Za-z_]\w*)/.exec(masked.slice(pos+3)) : member;
+        if (!name) throw new Error('Optional chaining expects a property, index, or method');
+        const memberEnd=pos+2+name[1].length+(colon?1:0);
+        const spaces=/^[ \t]*/.exec(masked.slice(memberEnd))[0];
+        const openAt=memberEnd+spaces.length;
+        if (masked[openAt]==='(') {
+          let depth=1,closing=-1;
+          for(let i=openAt+1;i<masked.length;i++){
+            if(masked[i]==='(')depth++;
+            if(masked[i]===')')depth--;
+            if(depth===0){closing=i;break;}
+          }
+          if(closing<0)throw new Error('Unclosed optional method call');
+          const receiver=source.slice(left,pos).trim();
+          const args=source.slice(openAt+1,closing);
+          const invoke=`__lauaReceiver${colon?':':'.'}${name[1]}(${args})`;
+          source=source.slice(0,left)+`__lauaCore.optionalCall(${receiver}, function(__lauaReceiver) return ${invoke} end)`+source.slice(closing+1);
+          continue;
+        }
+        if(colon)throw new Error('Optional colon access requires a method call');
         const base = source.slice(left, pos).trim();
         source = source.slice(0, left) + `__lauaCore.optional(${base}, "${member[1]}")` + source.slice(pos + 2 + member[1].length);
       }
@@ -1378,9 +1442,9 @@ local part = message[1:7]`;
 
     // The playground embeds the same runtime implementations as transpiler.luau.
     // Generated output is self-contained; no sibling Laua runtime ModuleScripts are required.
-    const LAUA_ASYNC_RUNTIME_SOURCE = "local Async = {}\nlocal Promise = {}\nPromise.__index = Promise\n\nlocal function isPromise(value)\n    return type(value) == \"table\" and getmetatable(value) == Promise\nend\n\nlocal function settle(promise, status, values)\n    if promise._status ~= \"Pending\" then return end\n    promise._status = status\n    promise._values = values\n    for _, thread in promise._waiters do\n        task.spawn(thread, status == \"Fulfilled\", table.unpack(values, 1, values.n))\n    end\n    table.clear(promise._waiters)\nend\n\nfunction Async.run(callback, ...)\n    assert(type(callback) == \"function\", \"Async.run expects a function\")\n    local promise = setmetatable({_status = \"Pending\", _values = nil, _waiters = {}}, Promise)\n    local args = table.pack(...)\n    task.spawn(function()\n        local result = table.pack(xpcall(function()\n            return callback(table.unpack(args, 1, args.n))\n        end, function(err) return err end))\n        if result[1] then\n            local values = table.pack(table.unpack(result, 2, result.n))\n            if values.n == 1 and isPromise(values[1]) then\n                local settled = table.pack(pcall(Async.await, values[1]))\n                if settled[1] then\n                    settle(promise, \"Fulfilled\", table.pack(table.unpack(settled, 2, settled.n)))\n                else\n                    settle(promise, \"Rejected\", table.pack(settled[2]))\n                end\n            else\n                settle(promise, \"Fulfilled\", values)\n            end\n        else\n            settle(promise, \"Rejected\", table.pack(result[2]))\n        end\n    end)\n    return promise\nend\n\nfunction Async.await(value)\n    if not isPromise(value) then return value end\n    if value._status == \"Fulfilled\" then\n        return table.unpack(value._values, 1, value._values.n)\n    end\n    if value._status == \"Rejected\" then error(value._values[1], 2) end\n    local current = coroutine.running()\n    if not current then error(\"await requires a yieldable coroutine\", 2) end\n    table.insert(value._waiters, current)\n    local outcome = table.pack(coroutine.yield())\n    if not outcome[1] then error(outcome[2], 2) end\n    return table.unpack(outcome, 2, outcome.n)\nend\n\nfunction Promise:await()\n    return Async.await(self)\nend\n\nfunction Promise:andThen(callback)\n    return Async.run(function()\n        return callback(Async.await(self))\n    end)\nend\n\nfunction Promise:catch(callback)\n    return Async.run(function()\n        local result = table.pack(pcall(Async.await, self))\n        if result[1] then return table.unpack(result, 2, result.n) end\n        return callback(result[2])\n    end)\nend\n\nfunction Promise:finally(callback)\n    return Async.run(function()\n        local result = table.pack(pcall(Async.await, self))\n        callback()\n        if not result[1] then error(result[2], 0) end\n        return table.unpack(result, 2, result.n)\n    end)\nend\n\nfunction Promise:getStatus()\n    return self._status\nend\n\nAsync.Promise = Promise\nAsync.isPromise = isPromise\nreturn Async";
-    const LAUA_CORE_RUNTIME_SOURCE = "local LauaCore = {}\n\nfunction LauaCore.optional(value: any, key: any): any\n    if value == nil then return nil end\n    return value[key]\nend\n\nfunction LauaCore.coalesce(value: any, fallback: () -> any): any\n    if value ~= nil then return value end\n    return fallback()\nend\n\n\n-- Laua v22: spread merges consecutive array entries and then named keys.\nfunction LauaCore.spread(...: any): {[any]: any}\n    local result = {}\n    for index = 1, select(\"#\", ...) do\n        local item = select(index, ...)\n        assert(type(item) == \"table\", \"spread expects tables\")\n        for arrayIndex = 1, #item do\n            table.insert(result, item[arrayIndex])\n        end\n        for key, value in item do\n            if type(key) ~= \"number\" or key % 1 ~= 0 or key < 1 or key > #item then\n                result[key] = value\n            end\n        end\n    end\n    return result\nend\n\nfunction LauaCore.slice(value: any, first: number?, last: number?): any\n    local valueType = typeof(value)\n    if valueType == \"string\" then\n        return string.sub(value, first or 1, last or #value)\n    end\n    if valueType == \"buffer\" then\n        local length = buffer.len(value)\n        local startIndex = first or 1\n        local endIndex = last or length\n        if startIndex < 0 then startIndex = length + startIndex + 1 end\n        if endIndex < 0 then endIndex = length + endIndex + 1 end\n        startIndex = math.clamp(startIndex, 1, length + 1)\n        endIndex = math.clamp(endIndex, 0, length)\n        local size = math.max(0, endIndex - startIndex + 1)\n        local result = buffer.create(size)\n        if size > 0 then buffer.copy(result, 0, value, startIndex - 1, size) end\n        return result\n    end\n    error(\"slice supports strings and buffers only\")\nend\n\nLauaCore.table = {}\n\nfunction LauaCore.table.filter(items: {any}, predicate: (any, number) -> boolean): {any}\n    local out = {}\n    for index, item in items do\n        if predicate(item, index) then table.insert(out, item) end\n    end\n    return out\nend\n\nfunction LauaCore.table.map(items: {any}, callback: (any, number) -> any): {any}\n    local out = {}\n    for index, item in items do\n        out[index] = callback(item, index)\n    end\n    return out\nend\n\nfunction LauaCore.table.reduce(items: {any}, callback: (any, any, number) -> any, initial: any): any\n    local current = initial\n    for index, item in items do current = callback(current, item, index) end\n    return current\nend\n\nfunction LauaCore.table.findWhere(items: {any}, predicate: (any, number) -> boolean): any\n    for index, item in items do\n        if predicate(item, index) then return item end\n    end\n    return nil\nend\n\n-- Lazy imports can break *some* initialisation cycles if neither module\n-- accesses the other before both have finished loading.\nfunction LauaCore.lazyModule(resolve: () -> any): any\n    local loaded = false\n    local target = nil\n    local function get()\n        if not loaded then\n            target = resolve()\n            loaded = true\n        end\n        return target\n    end\n    return setmetatable({}, {\n        __index = function(_, key) return get()[key] end,\n        __newindex = function(_, key, value) get()[key] = value end,\n        __call = function(_, ...) return get()(...) end,\n    })\nend\n\nreturn LauaCore";
-    const LAUA_SIGNAL_RUNTIME_SOURCE = "local Signal = {}\nSignal.__index = Signal\n\nfunction Signal.new()\n    return setmetatable({ _event = Instance.new(\"BindableEvent\"), _destroyed = false }, Signal)\nend\n\nfunction Signal:Connect(callback: (...any) -> ())\n    assert(not self._destroyed, \"Cannot connect to a destroyed signal\")\n    assert(type(callback) == \"function\", \"Connect expects a function\")\n    return self._event.Event:Connect(callback)\nend\n\nfunction Signal:Once(callback: (...any) -> ())\n    assert(type(callback) == \"function\", \"Once expects a function\")\n    local connection\n    connection = self:Connect(function(...)\n        if connection then connection:Disconnect() end\n        callback(...)\n    end)\n    return connection\nend\n\nfunction Signal:Fire(...)\n    assert(not self._destroyed, \"Cannot fire a destroyed signal\")\n    self._event:Fire(...)\nend\n\nfunction Signal:Wait()\n    assert(not self._destroyed, \"Cannot wait on a destroyed signal\")\n    return self._event.Event:Wait()\nend\n\nfunction Signal:Destroy()\n    if self._destroyed then return end\n    self._destroyed = true\n    self._event:Destroy()\nend\n\nreturn Signal";
+    const LAUA_ASYNC_RUNTIME_SOURCE = "local Async = {}\nlocal Promise = {}\nPromise.__index = Promise\n\nlocal function isPromise(value)\n    return type(value) == \"table\" and getmetatable(value) == Promise\nend\n\nlocal function settle(promise, status, values)\n    if promise._status ~= \"Pending\" then return end\n    promise._status = status\n    promise._values = values\n    for _, thread in promise._waiters do\n        task.spawn(thread, status == \"Fulfilled\", table.unpack(values, 1, values.n))\n    end\n    table.clear(promise._waiters)\nend\n\nfunction Async.run(callback, ...)\n    assert(type(callback) == \"function\", \"Async.run expects a function\")\n    local promise = setmetatable({_status = \"Pending\", _values = nil, _waiters = {}}, Promise)\n    local args = table.pack(...)\n    task.spawn(function()\n        local result = table.pack(xpcall(function()\n            return callback(table.unpack(args, 1, args.n))\n        end, function(err) return err end))\n        if result[1] then\n            local values = table.pack(table.unpack(result, 2, result.n))\n            if values.n == 1 and isPromise(values[1]) then\n                local settled = table.pack(pcall(Async.await, values[1]))\n                if settled[1] then\n                    settle(promise, \"Fulfilled\", table.pack(table.unpack(settled, 2, settled.n)))\n                else\n                    settle(promise, \"Rejected\", table.pack(settled[2]))\n                end\n            else\n                settle(promise, \"Fulfilled\", values)\n            end\n        else\n            settle(promise, \"Rejected\", table.pack(result[2]))\n        end\n    end)\n    return promise\nend\n\nfunction Async.await(value)\n    if not isPromise(value) then\n        if type(value) == \"table\" and type(value.Wait) == \"function\" and type(value.Fire) == \"function\" then\n            return value:Wait()\n        end\n        return value\n    end\n    if value._status == \"Fulfilled\" then\n        return table.unpack(value._values, 1, value._values.n)\n    end\n    if value._status == \"Rejected\" then error(value._values[1], 2) end\n    local current = coroutine.running()\n    if not current then error(\"await requires a yieldable coroutine\", 2) end\n    table.insert(value._waiters, current)\n    local outcome = table.pack(coroutine.yield())\n    if not outcome[1] then error(outcome[2], 2) end\n    return table.unpack(outcome, 2, outcome.n)\nend\n\nfunction Promise:await()\n    return Async.await(self)\nend\n\nfunction Promise:andThen(callback)\n    return Async.run(function()\n        return callback(Async.await(self))\n    end)\nend\n\nfunction Promise:catch(callback)\n    return Async.run(function()\n        local result = table.pack(pcall(Async.await, self))\n        if result[1] then return table.unpack(result, 2, result.n) end\n        return callback(result[2])\n    end)\nend\n\nfunction Promise:finally(callback)\n    return Async.run(function()\n        local result = table.pack(pcall(Async.await, self))\n        callback()\n        if not result[1] then error(result[2], 0) end\n        return table.unpack(result, 2, result.n)\n    end)\nend\n\nfunction Promise:getStatus()\n    return self._status\nend\n\nAsync.Promise = Promise\nAsync.isPromise = isPromise\nreturn Async";
+    const LAUA_CORE_RUNTIME_SOURCE = "local LauaCore = {}\n\nfunction LauaCore.optional(value: any, key: any): any\n    if value == nil then return nil end\n    return value[key]\nend\n\nfunction LauaCore.coalesce(value: any, fallback: () -> any): any\n    if value ~= nil then return value end\n    return fallback()\nend\n\n\n-- Laua: spread merges consecutive array entries and then named keys.\nfunction LauaCore.spread(...: any): {[any]: any}\n    local result = {}\n    for index = 1, select(\"#\", ...) do\n        local item = select(index, ...)\n        assert(type(item) == \"table\", \"spread expects tables\")\n        for arrayIndex = 1, #item do\n            table.insert(result, item[arrayIndex])\n        end\n        for key, value in item do\n            if type(key) ~= \"number\" or key % 1 ~= 0 or key < 1 or key > #item then\n                result[key] = value\n            end\n        end\n    end\n    return result\nend\n\nfunction LauaCore.slice(value: any, first: number?, last: number?): any\n    local valueType = typeof(value)\n    if valueType == \"string\" then\n        return string.sub(value, first or 1, last or #value)\n    end\n    if valueType == \"buffer\" then\n        local length = buffer.len(value)\n        local startIndex = first or 1\n        local endIndex = last or length\n        if startIndex < 0 then startIndex = length + startIndex + 1 end\n        if endIndex < 0 then endIndex = length + endIndex + 1 end\n        startIndex = math.clamp(startIndex, 1, length + 1)\n        endIndex = math.clamp(endIndex, 0, length)\n        local size = math.max(0, endIndex - startIndex + 1)\n        local result = buffer.create(size)\n        if size > 0 then buffer.copy(result, 0, value, startIndex - 1, size) end\n        return result\n    end\n    error(\"slice supports strings and buffers only\")\nend\n\n\n-- Laua is: matches a Laua class or one of its ancestors.\nfunction LauaCore.is(value: any, class: any): boolean\n    if type(class) ~= \"table\" or type(value) ~= \"table\" then return false end\n    local candidate = getmetatable(value)\n    local visited = {}\n    while type(candidate) == \"table\" and not visited[candidate] do\n        if candidate == class then return true end\n        visited[candidate] = true\n        local meta = getmetatable(candidate)\n        candidate = type(meta) == \"table\" and meta.__index or nil\n    end\n    return false\nend\n\n-- Unlike an eager index, the index expression is not evaluated for nil.\nfunction LauaCore.optionalCall(value: any, callback: (any) -> any): any\n    if value == nil then return nil end\n    return callback(value)\nend\n\nfunction LauaCore.optionalIndex(value: any, key: () -> any): any\n    if value == nil then return nil end\n    return value[key()]\nend\n\n-- Cache complete result tuples, including nils; cache keys use argument identity.\nfunction LauaCore.memo(callback: (...any) -> ...any): (...any) -> ...any\n    local root = {}\n    local nilKey = {}\n    local terminal = {}\n    return function(...)\n        local args = table.pack(...)\n        local node = root\n        for index = 1, args.n do\n            local key = args[index]\n            if key == nil then key = nilKey end\n            local nextNode = node[key]\n            if not nextNode then nextNode = {}; node[key] = nextNode end\n            node = nextNode\n        end\n        local cached = node[terminal]\n        if not cached then\n            cached = table.pack(callback(table.unpack(args, 1, args.n)))\n            node[terminal] = cached\n        end\n        return table.unpack(cached, 1, cached.n)\n    end\nend\n\nLauaCore.table = {}\n\nfunction LauaCore.table.filter(items: {any}, predicate: (any, number) -> boolean): {any}\n    local out = {}\n    for index, item in items do\n        if predicate(item, index) then table.insert(out, item) end\n    end\n    return out\nend\n\nfunction LauaCore.table.map(items: {any}, callback: (any, number) -> any): {any}\n    local out = {}\n    for index, item in items do\n        out[index] = callback(item, index)\n    end\n    return out\nend\n\nfunction LauaCore.table.reduce(items: {any}, callback: (any, any, number) -> any, initial: any): any\n    local current = initial\n    for index, item in items do current = callback(current, item, index) end\n    return current\nend\n\nfunction LauaCore.table.findWhere(items: {any}, predicate: (any, number) -> boolean): any\n    for index, item in items do\n        if predicate(item, index) then return item end\n    end\n    return nil\nend\n\n-- Lazy imports can break *some* initialisation cycles if neither module\n-- accesses the other before both have finished loading.\nfunction LauaCore.lazyModule(resolve: () -> any): any\n    local loaded = false\n    local target = nil\n    local function get()\n        if not loaded then\n            target = resolve()\n            loaded = true\n        end\n        return target\n    end\n    return setmetatable({}, {\n        __index = function(_, key) return get()[key] end,\n        __newindex = function(_, key, value) get()[key] = value end,\n        __call = function(_, ...) return get()(...) end,\n    })\nend\n\nreturn LauaCore";
+    const LAUA_SIGNAL_RUNTIME_SOURCE = "local Signal = {}\nSignal.__index = Signal\n\nfunction Signal.new(typeNames: {string}?)\n    return setmetatable({ _event = Instance.new(\"BindableEvent\"), _destroyed = false, _types = typeNames }, Signal)\nend\n\nfunction Signal:Connect(callback: (...any) -> ())\n    assert(not self._destroyed, \"Cannot connect to a destroyed signal\")\n    assert(type(callback) == \"function\", \"Connect expects a function\")\n    return self._event.Event:Connect(callback)\nend\n\nfunction Signal:Once(callback: (...any) -> ())\n    assert(type(callback) == \"function\", \"Once expects a function\")\n    local connection\n    connection = self:Connect(function(...)\n        if connection then connection:Disconnect() end\n        callback(...)\n    end)\n    return connection\nend\n\nfunction Signal:Fire(...)\n    assert(not self._destroyed, \"Cannot fire a destroyed signal\")\n    local types = self._types\n    if types then\n        assert(select(\"#\", ...) == #types, \"Signal argument count mismatch\")\n        for index, name in types do\n            local value = select(index, ...)\n            local optional = name:sub(-1) == \"?\"\n            local typeName = optional and name:sub(1,-2) or name\n            if value == nil and optional then continue end\n            if typeof(value) ~= typeName then\n                if not (typeof(value) == \"Instance\" and value:IsA(typeName)) then\n                    error(\"Signal expected \" .. typeName .. \" at argument \" .. index, 2)\n                end\n            end\n        end\n    end\n    self._event:Fire(...)\nend\n\nfunction Signal:Wait()\n    assert(not self._destroyed, \"Cannot wait on a destroyed signal\")\n    return self._event.Event:Wait()\nend\n\nfunction Signal:Destroy()\n    if self._destroyed then return end\n    self._destroyed = true\n    self._event:Destroy()\nend\n\nreturn Signal";
 
     function insertLauaEmbeddedRuntimes(source) {
       const fragments = [];
@@ -1395,7 +1459,7 @@ local part = message[1:7]`;
       return lines.join("\n");
     }
 
-    function validateV22Experimental(source) {
+    function validatePendingFeatures(source) {
       for (const raw of source.split('\n')) {
         const line = maskNonCode(raw).trim();
         const pending = [
@@ -1408,7 +1472,7 @@ local part = message[1:7]`;
           [/\bregex\.(?:match|find)\s*\(/, 'Full regular expressions']
         ];
         for (const [pattern,feature] of pending) {
-          if (pattern.test(line)) throw new Error(`${feature} are not implemented in this v3.8 playground.`);
+          if (pattern.test(line)) throw new Error(`${feature} are not implemented in this v3.9 playground.`);
         }
       }
     }
@@ -1468,15 +1532,131 @@ local part = message[1:7]`;
       }).join('\n');
     }
 
-    function transpile(source, runtimeRequire) {
-      validateV22Experimental(source);
+
+    function transpileIsOperator(source) {
+      let from = 0;
+      while (true) {
+        const masked = maskNonCode(source);
+        const pattern = /\bis\b/g;
+        pattern.lastIndex = from;
+        const match = pattern.exec(masked);
+        if (!match) return source;
+        const pos = match.index;
+        const linePrefix=masked.slice(masked.lastIndexOf('\n',pos-1)+1,pos);
+        if (['.',':'].includes(masked[pos-1]) || /function\s+$/.test(linePrefix)) {from=pos+2;continue;}
+        const left = lauLeft(masked,pos-1);
+        const right = /^([ \t]+)([A-Za-z_]\w*)/.exec(masked.slice(pos+2));
+        if (left < 0 || !right) throw new Error('is expects: value is ClassName');
+        const end = pos+2+right[0].length;
+        const expression = source.slice(left,pos).trim();
+        source = source.slice(0,left)+`__lauaCore.is(${expression}, ${right[2]})`+source.slice(end);
+        from = left+15;
+      }
+    }
+
+    function transpilePipelines(source) {
+      return source.split('\n').map(raw => {
+        const masked=maskNonCode(raw),positions=[];
+        let at=0;
+        while ((at=masked.indexOf('|>',at))!==-1) {positions.push(at);at+=2;}
+        if (!positions.length) return raw;
+        const before=raw.slice(0,positions[0]);
+        let match=/^(.*?=\s*)(.+)$/.exec(before);
+        if (!match) match=/^(\s*return\s+)(.+)$/.exec(before);
+        if (!match) throw new Error('Pipeline requires assignment or return');
+        let value=match[2].trim();
+        if (!value) throw new Error('Pipeline input is empty');
+        for (let i=0;i<positions.length;i++) {
+          const stage=raw.slice(positions[i]+2,positions[i+1]??raw.length).trim();
+          if (!/^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/.test(stage)) throw new Error('Pipeline stages must be function names');
+          value=`${stage}(${value})`;
+        }
+        return match[1]+value;
+      }).join('\n');
+    }
+
+    function transpileMemo(source) {
+      while (true) {
+        const masked=maskNonCode(source),find=/\bmemo\b/g;
+        let match=find.exec(masked);
+        while (match && ['.',':'].includes(masked[match.index-1])) match=find.exec(masked);
+        if (!match) return source;
+        const start=match.index,lineStart=source.lastIndexOf('\n',start-1)+1;
+        if (source.slice(lineStart,start).trim()) throw new Error('memo must start a declaration');
+        const endOfHeader=source.indexOf('\n',start);
+        if (endOfHeader<0) throw new Error('memo requires a function body');
+        const header=source.slice(start,endOfHeader).trim();
+        const declaration=/^memo\s+(?:local\s+)?function\s+([A-Za-z_]\w*)\s*\(/.exec(header);
+        if (!declaration) throw new Error('memo supports named functions only');
+        const fixed=source.slice(0,start)+header.replace(/^memo\s+/,'')+source.slice(endOfHeader);
+        const end=findMatchingEndByLines(fixed,start);
+        const indent=source.slice(lineStart,start);
+        source=fixed.slice(0,end.end+1)+`\n${indent}${declaration[1]} = __lauaCore.memo(${declaration[1]})`+fixed.slice(end.end+1);
+      }
+    }
+
+    function transpileParameterDefaults(source) {
+      return source.split('\n').map(raw=>{
+        const masked=maskNonCode(raw);
+        const at=/\bfunction\b/.exec(masked);
+        if (!at) return raw;
+        const open=masked.indexOf('(',at.index),close=masked.indexOf(')',open+1);
+        if(open<0||close<0)return raw;
+        const params=raw.slice(open+1,close);
+        if(!params.includes('='))return raw;
+        const parsed=[],initializers=[];
+        for(const piece of params.split(',')) {
+          const m=/^\s*(.*?)\s*=\s*(.*?)\s*$/.exec(piece);
+          if(!m){parsed.push(piece.trim());continue;}
+          const name=/^[A-Za-z_]\w*/.exec(m[1]);
+          if(!name)throw new Error('Invalid default parameter');
+          parsed.push(m[1].trim());
+          initializers.push(`if ${name[0]} == nil then ${name[0]} = ${m[2]} end`);
+        }
+        return raw.slice(0,open+1)+parsed.join(', ')+raw.slice(close)+'\n'+initializers.map(s=>(raw.match(/^[ \t]*/)[0]+'    '+s)).join('\n');
+      }).join('\n');
+    }
+
+    function preprocessMode(source,mode) {
+      const result=[],stack=[];
+      let active=true;
+      for(const line of source.split('\n')){
+        const flag=/^\s*--#if\s+(\w+)\s*$/.exec(line);
+        if(flag){
+          const wanted=flag[1];
+          if(!['DEBUG','RELEASE','DEVELOPMENT'].includes(wanted))throw new Error('Unknown --#if mode '+wanted);
+          stack.push({parent:active,matched:wanted===mode.toUpperCase(),hasElse:false});
+          active=active&&wanted===mode.toUpperCase();result.push('');continue;
+        }
+        if(/^\s*--#else\s*$/.test(line)){
+          const top=stack.at(-1);if(!top||top.hasElse)throw new Error('Unexpected --#else');
+          top.hasElse=true;active=top.parent&&!top.matched;result.push('');continue;
+        }
+        if(/^\s*--#end\s*$/.test(line)){
+          const top=stack.pop();if(!top)throw new Error('Unexpected --#end');
+          active=top.parent;result.push('');continue;
+        }
+        result.push(active?line:'');
+      }
+      if(stack.length)throw new Error('Missing --#end for compile-time branch');
+      return result.join('\n');
+    }
+
+    function transpile(source, options = {}) {
+      const mode = typeof options === 'object' && options !== null ? (options.Mode || 'Development') : 'Development';
+      if (!['Development','Release','Debug'].includes(mode)) throw new Error('Invalid Laua compile mode');
+      source = preprocessMode(source,mode);
+      validatePendingFeatures(source);
+      source = transpilePipelines(source);
+      source = transpileMemo(source);
+      source = transpileIsOperator(source);
       source = transpileAdditionalSyntax(source);
       const exported = transpileExports(source);
       const deferred = transpileDeferFunctions(transpileExtensions(transpileCore(transpileUsing(transpileCoalescingAssign(exported.source)))));
       const asynchronous = transpileAsyncFunctions(deferred);
       const awaited = transpileAwaits(asynchronous.source);
       if (awaited.count && !asynchronous.count) throw new Error("await requires an async function");
-      let output = insertLauaEmbeddedRuntimes(awaited.source);
+      let output = insertLauaEmbeddedRuntimes(transpileParameterDefaults(awaited.source));
       if (exported.names.length) output += `\nreturn {${exported.names.map(name => `${name} = ${name}`).join(', ')}}`;
       return output.split("\n").map(line => line.replace(/[\t ]+$/g, "")).join("\n");
     }
@@ -5428,6 +5608,11 @@ local part = message[1:7]`;
             source: "class Client\n    async function Run()\n        return await Get()\n    end\nend",
             expected: "function Client:Run()"
           },
+          { name: "class check", source: "class A\nend\nlocal a = new A\nprint(a is A)", expected: "__lauaCore.is(a, A)" },
+          { name: "pipeline", source: "local out = 5 |> Double |> tostring", expected: "tostring(Double(5))" },
+          { name: "memo function", source: "memo function Twice(a)\n return a * 2\nend", expected: "Twice = __lauaCore.memo(Twice)" },
+          { name: "optional index", source: "local value = data?.[index]", expected: "__lauaCore.optionalIndex(data, function() return index end)" },
+          { name: "default argument", source: "function F(a = 10)\n return a\nend", expected: "if a == nil then a = 10 end" },
           {
             name: "normal Luau .new",
             source: "local part = Instance.new(\"Part\")",
@@ -5486,12 +5671,19 @@ local part = message[1:7]`;
       }
 
 
+      let lastSuccessfulLuau = null;
+      let priorSuccessfulLuau = null;
+
       function runTranspile() {
         try {
-          const output = transpile(lauaEditor.getValue());
+          const output = transpile(lauaEditor.getValue(), {Mode: document.getElementById("modeSelect").value});
+          if (lastSuccessfulLuau !== output) {
+            priorSuccessfulLuau = lastSuccessfulLuau;
+            lastSuccessfulLuau = output;
+          }
           luauEditor.setValue(output);
           const directives = readPlaygroundDirectives(lauaEditor.getValue());
-          status.textContent = `Transpiled · ${directives.mode} · optimize ${directives.optimize ?? "default"} (applied by Roblox when pasted into Studio)`;
+          status.textContent = `Transpiled · ${document.getElementById("modeSelect").value} build · ${directives.mode} · optimize ${directives.optimize ?? "default"} (Roblox handles optimization)`;
           status.className = "ok";
           return output;
         } catch (err) {
@@ -5501,6 +5693,49 @@ local part = message[1:7]`;
           status.className = "error";
           return null;
         }
+      }
+
+      function generateLauaDocs(source) {
+        const declarations = [];
+        for (const raw of source.split('\n')) {
+          const line = raw.trim();
+          const declaration = /^(?:export\s+)?(?:(?:abstract|final)\s+)?(class|namespace|enum)\s+([A-Za-z_]\w*)/.exec(line);
+          const func = /^(?:export\s+)?(?:local\s+)?(?:async\s+)?function\s+([A-Za-z_][\w.:]*)\s*\(([^)]*)\)/.exec(line);
+          const signal = /^signal\s+([A-Za-z_]\w*)/.exec(line);
+          if (declaration) declarations.push(`### ${declaration[1]} ${declaration[2]}\n\n\`${line}\``);
+          else if (func) declarations.push(`### function ${func[1]}\n\n\`${line}\``);
+          else if (signal) declarations.push(`### signal ${signal[1]}\n\n\`${line}\``);
+        }
+        return '# Laua declarations\n\nGenerated from the currently open file. This is a declaration index, not full API analysis.\n\n' + (declarations.join('\n\n') || '_No declarations detected._')+'\n';
+      }
+
+      function diffLuau(oldText,newText) {
+        const oldLines=oldText.split('\n'),newLines=newText.split('\n');
+        if (oldLines.length>400 || newLines.length>400) return 'Output exceeds the 400-line diff limit. The code itself was not truncated.';
+        const a=oldLines.length,b=newLines.length;
+        const matrix=Array.from({length:a+1},()=>new Uint16Array(b+1));
+        for(let i=a-1;i>=0;i--){
+          for(let j=b-1;j>=0;j--){
+            matrix[i][j]=oldLines[i]===newLines[j]?matrix[i+1][j+1]+1:Math.max(matrix[i+1][j],matrix[i][j+1]);
+          }
+        }
+        let i=0,j=0;
+        const result=[];
+        while(i<a||j<b){
+          if(i<a&&j<b&&oldLines[i]===newLines[j]) {result.push('  '+oldLines[i]);i++;j++;}
+          else if(i<a&&(j===b||matrix[i+1][j]>=matrix[i][j+1])) result.push('- '+oldLines[i++]);
+          else result.push('+ '+newLines[j++]);
+        }
+        return result.join('\n');
+      }
+
+      function downloadPlaygroundText(filename,content) {
+        const url=URL.createObjectURL(new Blob([content],{type:'text/plain;charset=utf-8'}));
+        const link=document.createElement('a');
+        link.href=url;
+        link.download=filename;
+        document.body.appendChild(link);
+        link.click();link.remove();URL.revokeObjectURL(url);
       }
 
       function copyTextFallback(text) {
@@ -5568,6 +5803,48 @@ local part = message[1:7]`;
       document.getElementById("lintBtn").addEventListener("click", () => runLint(true));
       document.getElementById("transpileBtn").addEventListener("click", runTranspile);
       copyButton.addEventListener("click", copyTranspiledCode);
+      document.getElementById("modeSelect").addEventListener("change", runTranspile);
+      document.getElementById("closeDiffBtn").addEventListener("click", () => document.getElementById("diffDialog").close());
+      document.getElementById("diffBtn").addEventListener("click", () => {
+        if (priorSuccessfulLuau === null || lastSuccessfulLuau === null) {
+          status.textContent="Transpile two different versions before opening Output Diff.";
+          status.className="error";
+          return;
+        }
+        document.getElementById("diffResult").textContent=diffLuau(priorSuccessfulLuau,lastSuccessfulLuau);
+        document.getElementById("diffDialog").showModal();
+      });
+      document.getElementById("docsBtn").addEventListener("click", () => {
+        downloadPlaygroundText("Laua_DEFINITIONS.md",generateLauaDocs(lauaEditor.getValue()));
+        status.textContent="Exported Laua_DEFINITIONS.md";
+        status.className="ok";
+      });
+      document.getElementById("testsBtn").addEventListener("click", () => {
+        try {
+          runTranspilerSelfTests();
+          const release = transpile("--#if RELEASE\nprint('release')\n--#else\nprint('debug')\n--#end", {Mode:"Release"});
+          if (!release.includes("print('release')") || release.includes("print('debug')")) throw new Error("Release mode failed");
+          status.textContent = "Compiler regression tests passed.";
+          status.className = "ok";
+        } catch (error) {
+          status.textContent = "Tests failed: " + (error?.message || String(error));
+          status.className = "error";
+        }
+      });
+      document.getElementById("exportBtn").addEventListener("click", () => {
+        const output = runTranspile();
+        if (output === null) return;
+        const url = URL.createObjectURL(new Blob([output], {type:"text/plain;charset=utf-8"}));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "output.luau";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        status.textContent = "Exported output.luau";
+        status.className = "ok";
+      });
       document.getElementById("exampleBtn").addEventListener("click", () => {
         lauaEditor.setValue(STARTER);
         runTranspile();
