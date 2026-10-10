@@ -74,10 +74,10 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.11 · multi-file · live lint</span>
+      <span>pronounced “Lawah” · v3.12 · multi-file · live lint</span>
     </div>
     <div class="actions">
-      <button id="exampleBtn">Example</button>
+      <button id="exampleBtn" title="Load the built-in starter example into main.laua (other files stay unchanged)">Default main.laua</button>
       <button id="clearBtn">Clear</button>
       <button id="lintBtn">Lint</button>
       <label class="mode-label" for="modeSelect">Mode
@@ -5687,17 +5687,19 @@ local part = message[1:7]`;
           const saved=JSON.parse(localStorage.getItem(PROJECT_KEY) || "null");
           if (!saved || !Array.isArray(saved.files) || !saved.files.length || saved.files.length > 100) return null;
           const seen=new Set(), safe=[];
+          let migratedMain = false;
           for (const entry of saved.files) {
             const name=normalizeProjectFilename(entry.name);
             if (seen.has(name) || typeof entry.source!=="string") return null;
-            // Upgrade only the untouched v3.10 main.laua demo.
-            // Keep every user-edited source file unchanged.
-            const source = name === "main.laua" && entry.source === PREVIOUS_MAIN_STARTER
-              ? STARTER
-              : entry.source;
+            // Only migrate the exact unchanged v3.10 demo. Never replace real edits.
+            const isUntouchedOldMain = name === "main.laua" && entry.source === PREVIOUS_MAIN_STARTER;
+            const source = isUntouchedOldMain ? STARTER : entry.source;
+            if (isUntouchedOldMain) migratedMain = true;
             seen.add(name);safe.push({name,source});
           }
-          return {files:safe,active:seen.has(saved.active)?saved.active:safe[0].name};
+          // Show the migrated starter immediately, even if another tab was active.
+          const active = migratedMain ? "main.laua" : seen.has(saved.active) ? saved.active : safe[0].name;
+          return {files:safe,active};
         } catch { return null; }
       }
 
@@ -6294,10 +6296,23 @@ local part = message[1:7]`;
         status.textContent = `Exported ${activeFile} as Luau`;
         status.className = "ok";
       });
-      document.getElementById("exampleBtn").addEventListener("click", () => {
-        lauaEditor.setValue(STARTER);
+      function loadDefaultMain() {
+        let main = projectFiles.get("main.laua");
+        if (!main) {
+          main = createProjectFile("main.laua", STARTER);
+        } else if (main.model.getValue() !== STARTER) {
+          const isUntouchedOldDemo = main.model.getValue() === PREVIOUS_MAIN_STARTER;
+          // Do not silently discard a user's saved edits or deliberately empty file.
+          if (!isUntouchedOldDemo && !confirm("Replace main.laua with the default example? Your current main.laua code will be overwritten. Other files are unchanged.")) return;
+          main.model.setValue(STARTER);
+        }
+        switchProjectFile("main.laua");
         runTranspile();
-      });
+        status.textContent = "Loaded default example into main.laua · Other files unchanged";
+        status.className = "ok";
+      }
+
+      document.getElementById("exampleBtn").addEventListener("click", loadDefaultMain);
       document.getElementById("clearBtn").addEventListener("click", () => {
         lauaEditor.setValue("");
         luauEditor.setValue("");
@@ -6322,6 +6337,9 @@ local part = message[1:7]`;
 
       runTranspilerSelfTests();
       runTranspile();
+      if (savedProject && projectFiles.get("main.laua")?.model.getValue() !== STARTER) {
+        status.textContent += " · Saved project restored; click Default main.laua to load the starter.";
+      }
     });
   </script>
 </body>
