@@ -1,360 +1,360 @@
 local Transpiler = {}
 
 local function trim(value: string): string
-	return (value:match("^%s*(.-)%s*$") or "")
+    return (value:match("^%s*(.-)%s*$") or "")
 end
 
 local function maskNonCode(source: string): string
-	local output = table.create(#source)
-	local position = 1
-	local quote = nil
-	local longClose = nil
-	local lineComment = false
+    local output = table.create(#source)
+    local position = 1
+    local quote = nil
+    local longClose = nil
+    local lineComment = false
 
-	while position <= #source do
-		local char = source:sub(position, position)
-		local nextChar = source:sub(position + 1, position + 1)
-		local pair = char .. nextChar
+    while position <= #source do
+        local char = source:sub(position, position)
+        local nextChar = source:sub(position + 1, position + 1)
+        local pair = char .. nextChar
 
-		if longClose then
-			local closing = source:sub(position, position + #longClose - 1) == longClose
-			if closing then
-				for _ = 1, #longClose do table.insert(output, " ") end
-				position += #longClose
-				longClose = nil
-			else
-				table.insert(output, char == "\n" and "\n" or " ")
-				position += 1
-			end
-		elseif lineComment then
-			table.insert(output, char == "\n" and "\n" or " ")
-			if char == "\n" then lineComment = false end
-			position += 1
-		elseif quote then
-			if char == "\\" and position < #source then
-				table.insert(output, " ")
-				table.insert(output, " ")
-				position += 2
-			else
-				table.insert(output, char == "\n" and "\n" or " ")
-				if char == quote then quote = nil end
-				position += 1
-			end
-		elseif pair == "--" then
-			local equals = source:sub(position):match("^%-%-%[(=*)%[")
-			if equals then
-				local opening = 4 + #equals
-				for _ = 1, opening do table.insert(output, " ") end
-				position += opening
-				longClose = "]" .. equals .. "]"
-			else
-				table.insert(output, " ")
-				table.insert(output, " ")
-				lineComment = true
-				position += 2
-			end
-		elseif char == '"' or char == "'" or char == "`" then
-			quote = char
-			table.insert(output, " ")
-			position += 1
-		elseif char == "[" then
-			local equals = source:sub(position):match("^%[(=*)%[")
-			if equals then
-				local opening = 2 + #equals
-				for _ = 1, opening do table.insert(output, " ") end
-				position += opening
-				longClose = "]" .. equals .. "]"
-			else
-				table.insert(output, char)
-				position += 1
-			end
-		else
-			table.insert(output, char)
-			position += 1
-		end
-	end
+        if longClose then
+            local closing = source:sub(position, position + #longClose - 1) == longClose
+            if closing then
+                for _ = 1, #longClose do table.insert(output, " ") end
+                position += #longClose
+                longClose = nil
+            else
+                table.insert(output, char == "\n" and "\n" or " ")
+                position += 1
+            end
+        elseif lineComment then
+            table.insert(output, char == "\n" and "\n" or " ")
+            if char == "\n" then lineComment = false end
+            position += 1
+        elseif quote then
+            if char == "\\" and position < #source then
+                table.insert(output, " ")
+                table.insert(output, " ")
+                position += 2
+            else
+                table.insert(output, char == "\n" and "\n" or " ")
+                if char == quote then quote = nil end
+                position += 1
+            end
+        elseif pair == "--" then
+            local equals = source:sub(position):match("^%-%-%[(=*)%[")
+            if equals then
+                local opening = 4 + #equals
+                for _ = 1, opening do table.insert(output, " ") end
+                position += opening
+                longClose = "]" .. equals .. "]"
+            else
+                table.insert(output, " ")
+                table.insert(output, " ")
+                lineComment = true
+                position += 2
+            end
+        elseif char == '"' or char == "'" or char == "`" then
+            quote = char
+            table.insert(output, " ")
+            position += 1
+        elseif char == "[" then
+            local equals = source:sub(position):match("^%[(=*)%[")
+            if equals then
+                local opening = 2 + #equals
+                for _ = 1, opening do table.insert(output, " ") end
+                position += opening
+                longClose = "]" .. equals .. "]"
+            else
+                table.insert(output, char)
+                position += 1
+            end
+        else
+            table.insert(output, char)
+            position += 1
+        end
+    end
 
-	return table.concat(output)
+    return table.concat(output)
 end
 
 local function splitLines(source: string)
-	local lines = {}
-	local start = 1
+    local lines = {}
+    local start = 1
 
-	for index = 1, #source + 1 do
-		if index > #source or source:sub(index, index) == "\n" then
-			table.insert(lines, {Start = start, Finish = index - 1, Text = source:sub(start, index - 1)})
-			start = index + 1
-		end
-	end
+    for index = 1, #source + 1 do
+        if index > #source or source:sub(index, index) == "\n" then
+            table.insert(lines, {Start = start, Finish = index - 1, Text = source:sub(start, index - 1)})
+            start = index + 1
+        end
+    end
 
-	return lines
+    return lines
 end
 
 local function blockStart(line: string): boolean
-	if line:match("^abstract%s+class%s+") or line:match("^final%s+class%s+") or line:match("^class%s+") then return true end
-	if line:match("^namespace%s+") or line:match("^return%s+namespace%s+") or line:match("^enum%s+") or line:match("^match%s+") then return true end
-	if line:match("^constructor%s*%(") or line:match("^defer%s*$") or line:match("^operator%s+") then return true end
-	if line:match("^async%s+function%s+") or line:match("^local%s+async%s+function%s+") then return true end
-	if line:match("^get%s+[%a_][%w_]*%s*%(") or line:match("^set%s+[%a_][%w_]*%s*%(") then return true end
-	if line:match("^function%s+") or line:match("^local%s+function%s+") then return true end
-	if line:match("^.*=%s*function%s*%(") then return true end
-	if line:match("^if%s+.*%s+then%s*$") or line:match("^for%s+.*%s+do%s*$") then return true end
-	if line:match("^while%s+.*%s+do%s*$") or line:match("^do%s*$") or line:match("^repeat%s*$") then return true end
-	local remainder = line
-	while true do
-		local found = false
-		for _, modifier in {"public", "private", "protected", "static", "override", "final", "abstract"} do
-			local rest = remainder:match("^" .. modifier .. "%s+(.+)$")
-			if rest then remainder = rest; found = true; break end
-		end
-		if not found then break end
-	end
-	if remainder:match("^function%s+") or remainder:match("^async%s+function%s+") or remainder:match("^get%s+[%a_][%w_]*%s*%(") or remainder:match("^set%s+[%a_][%w_]*%s*%(") then return true end
-	return false
+    if line:match("^abstract%s+class%s+") or line:match("^final%s+class%s+") or line:match("^class%s+") then return true end
+    if line:match("^namespace%s+") or line:match("^return%s+namespace%s+") or line:match("^enum%s+") or line:match("^match%s+") then return true end
+    if line:match("^constructor%s*%(") or line:match("^defer%s*$") or line:match("^operator%s+") or line:match("^watch%s+[%a_][%w_]*%s*%(") then return true end
+    if line:match("^async%s+function%s+") or line:match("^local%s+async%s+function%s+") then return true end
+    if line:match("^get%s+[%a_][%w_]*%s*%(") or line:match("^set%s+[%a_][%w_]*%s*%(") then return true end
+    if line:match("^function%s+") or line:match("^local%s+function%s+") then return true end
+    if line:match("^.*=%s*function%s*%(") then return true end
+    if line:match("^if%s+.*%s+then%s*$") or line:match("^for%s+.*%s+do%s*$") then return true end
+    if line:match("^while%s+.*%s+do%s*$") or line:match("^do%s*$") or line:match("^repeat%s*$") then return true end
+    local remainder = line
+    while true do
+        local found = false
+        for _, modifier in {"public", "private", "protected", "static", "override", "final", "abstract"} do
+            local rest = remainder:match("^" .. modifier .. "%s+(.+)$")
+            if rest then remainder = rest; found = true; break end
+        end
+        if not found then break end
+    end
+    if remainder:match("^function%s+") or remainder:match("^async%s+function%s+") or remainder:match("^get%s+[%a_][%w_]*%s*%(") or remainder:match("^set%s+[%a_][%w_]*%s*%(") then return true end
+    return false
 end
 
 local function findBlock(source: string, startIndex: number)
-	local lines = splitLines(source)
-	local lineIndex = nil
+    local lines = splitLines(source)
+    local lineIndex = nil
 
-	for index, line in lines do
-		if startIndex >= line.Start and startIndex <= line.Finish then
-			lineIndex = index
-			break
-		end
-	end
-	if not lineIndex then error("Cannot find Laua block") end
+    for index, line in lines do
+        if startIndex >= line.Start and startIndex <= line.Finish then
+            lineIndex = index
+            break
+        end
+    end
+    if not lineIndex then error("Cannot find Laua block") end
 
-	local depth = 0
-	for index = lineIndex, #lines do
-		local line = trim(maskNonCode(lines[index].Text))
-		if blockStart(line) then depth += 1 end
-		if line:match("^end%s*;?%s*$") or line:match("^until%s+") then
-			depth -= 1
-			if depth == 0 then return lines[index] end
-		end
-	end
+    local depth = 0
+    for index = lineIndex, #lines do
+        local line = trim(maskNonCode(lines[index].Text))
+        if blockStart(line) then depth += 1 end
+        if line:match("^end%s*;?%s*$") or line:match("^until%s+") then
+            depth -= 1
+            if depth == 0 then return lines[index] end
+        end
+    end
 
-	error("Missing 'end' in Laua source")
+    error("Missing 'end' in Laua source")
 end
 
 local function findKeyword(source: string, keyword: string): number?
-	local masked = maskNonCode(source)
-	local start = 1
+    local masked = maskNonCode(source)
+    local start = 1
 
-	while true do
-		local first, last = masked:find(keyword, start, true)
-		if not first then return nil end
-		local before = masked:sub(first - 1, first - 1)
-		local after = masked:sub(last + 1, last + 1)
-		if not before:match("[%w_%.:]") and not after:match("[%w_]") then return first end
-		start = last + 1
-	end
+    while true do
+        local first, last = masked:find(keyword, start, true)
+        if not first then return nil end
+        local before = masked:sub(first - 1, first - 1)
+        local after = masked:sub(last + 1, last + 1)
+        if not before:match("[%w_%.:]") and not after:match("[%w_]") then return first end
+        start = last + 1
+    end
 end
 
 local function normalized(source: string, prefix: string): string
-	local lines = splitLines(source)
-	local first, last = 1, #lines
-	while first <= last and trim(lines[first].Text) == "" do first += 1 end
-	while last >= first and trim(lines[last].Text) == "" do last -= 1 end
-	if first > last then return "" end
-	local minimum = math.huge
-	for index = first, last do
-		local line = lines[index].Text
-		if trim(line) ~= "" then
-			local leading = line:match("^[ \t]*") or ""
-			minimum = math.min(minimum, #leading)
-		end
-	end
-	local result = {}
-	for index = first, last do
-		local line = lines[index].Text
-		if trim(line) == "" then
-			table.insert(result, "")
-		else
-			table.insert(result, prefix .. line:sub(minimum + 1))
-		end
-	end
-	return table.concat(result, "\n")
+    local lines = splitLines(source)
+    local first, last = 1, #lines
+    while first <= last and trim(lines[first].Text) == "" do first += 1 end
+    while last >= first and trim(lines[last].Text) == "" do last -= 1 end
+    if first > last then return "" end
+    local minimum = math.huge
+    for index = first, last do
+        local line = lines[index].Text
+        if trim(line) ~= "" then
+            local leading = line:match("^[ \t]*") or ""
+            minimum = math.min(minimum, #leading)
+        end
+    end
+    local result = {}
+    for index = first, last do
+        local line = lines[index].Text
+        if trim(line) == "" then
+            table.insert(result, "")
+        else
+            table.insert(result, prefix .. line:sub(minimum + 1))
+        end
+    end
+    return table.concat(result, "\n")
 end
 
 local transpileSource
 
 local function transpileNew(source: string): string
-	while true do
-		local start = findKeyword(source, "new")
-		if not start then return source end
-		local rest = source:sub(start + 3)
-		local whitespace, className = rest:match("^(%s+)([%a_][%w_%.]*)")
-		if not className then error("Expected class name after 'new'") end
-		local after = start + 3 + #whitespace + #className
-		local suffix = source:sub(after)
-		if suffix:match("^%s*%(") then
-			source = source:sub(1, start - 1) .. className .. ".new" .. suffix
-		else
-			source = source:sub(1, start - 1) .. className .. ".new()" .. suffix
-		end
-	end
+    while true do
+        local start = findKeyword(source, "new")
+        if not start then return source end
+        local rest = source:sub(start + 3)
+        local whitespace, className = rest:match("^(%s+)([%a_][%w_%.]*)")
+        if not className then error("Expected class name after 'new'") end
+        local after = start + 3 + #whitespace + #className
+        local suffix = source:sub(after)
+        if suffix:match("^%s*%(") then
+            source = source:sub(1, start - 1) .. className .. ".new" .. suffix
+        else
+            source = source:sub(1, start - 1) .. className .. ".new()" .. suffix
+        end
+    end
 end
 
 local function transpileEnums(source: string): string
-	while true do
-		local start = findKeyword(source, "enum")
-		if not start then return source end
-		local headerEnd = source:find("\n", start, true)
-		if not headerEnd then error("Enum body expected") end
-		local name = trim(source:sub(start, headerEnd - 1)):match("^enum%s+([%a_][%w_]*)$")
-		if not name then error("Invalid enum declaration") end
-		local closing = findBlock(source, start)
-		local body = source:sub(headerEnd + 1, closing.Start - 1)
-		local members = {}
-		local nextNumber = 0
+    while true do
+        local start = findKeyword(source, "enum")
+        if not start then return source end
+        local headerEnd = source:find("\n", start, true)
+        if not headerEnd then error("Enum body expected") end
+        local name = trim(source:sub(start, headerEnd - 1)):match("^enum%s+([%a_][%w_]*)$")
+        if not name then error("Invalid enum declaration") end
+        local closing = findBlock(source, start)
+        local body = source:sub(headerEnd + 1, closing.Start - 1)
+        local members = {}
+        local nextNumber = 0
 
-		for _, row in splitLines(body) do
-			local line = trim(row.Text):gsub(",$", "")
-			if line == "" or line:match("^%-%-") then continue end
-			local memberName, value = line:match("^([%a_][%w_]*)%s*=%s*(.+)$")
-			if not memberName then
-				memberName = line:match("^([%a_][%w_]*)$")
-				if not memberName then error(`Invalid enum member: {line}`) end
-				value = tostring(nextNumber)
-				nextNumber += 1
-			else
-				local integer = tonumber(value)
-				if integer and integer % 1 == 0 then nextNumber = integer + 1 end
-			end
-			table.insert(members, `    {memberName} = {value},`)
-		end
-		local replacement = "local " .. name .. " = table.freeze({\n" .. table.concat(members, "\n") .. "\n})"
-		source = source:sub(1, start - 1) .. replacement .. source:sub(closing.Finish + 1)
-	end
+        for _, row in splitLines(body) do
+            local line = trim(row.Text):gsub(",$", "")
+            if line == "" or line:match("^%-%-") then continue end
+            local memberName, value = line:match("^([%a_][%w_]*)%s*=%s*(.+)$")
+            if not memberName then
+                memberName = line:match("^([%a_][%w_]*)$")
+                if not memberName then error(`Invalid enum member: {line}`) end
+                value = tostring(nextNumber)
+                nextNumber += 1
+            else
+                local integer = tonumber(value)
+                if integer and integer % 1 == 0 then nextNumber = integer + 1 end
+            end
+            table.insert(members, `    {memberName} = {value},`)
+        end
+        local replacement = "local " .. name .. " = table.freeze({\n" .. table.concat(members, "\n") .. "\n})"
+        source = source:sub(1, start - 1) .. replacement .. source:sub(closing.Finish + 1)
+    end
 end
 
 local function parseModifiers(header: string)
-	local modifiers = {}
-	local rest = trim(header)
-	while true do
-		local modifier, tail = nil, nil
-		if not modifier then
-			for _, possible in {"public", "private", "protected", "static", "override", "abstract", "final"} do
-				local before = rest:match("^" .. possible .. "%s+(.+)$")
-				if before then
-					modifier = possible
-					tail = before
-					break
-				end
-			end
-		end
-		if not modifier then break end
-		if modifiers[modifier] then error(`Duplicate modifier '{modifier}'`) end
-		modifiers[modifier] = true
-		rest = tail
-	end
-	return modifiers, rest
+    local modifiers = {}
+    local rest = trim(header)
+    while true do
+        local modifier, tail = nil, nil
+        if not modifier then
+            for _, possible in {"public", "private", "protected", "static", "override", "abstract", "final"} do
+                local before = rest:match("^" .. possible .. "%s+(.+)$")
+                if before then
+                    modifier = possible
+                    tail = before
+                    break
+                end
+            end
+        end
+        if not modifier then break end
+        if modifiers[modifier] then error(`Duplicate modifier '{modifier}'`) end
+        modifiers[modifier] = true
+        rest = tail
+    end
+    return modifiers, rest
 end
 
 local function getParams(params: string): string
-	local names = {}
-	for part in params:gmatch("[^,]+") do
-		local name = trim(part):match("^([%a_][%w_]*)")
-		if name then table.insert(names, name) end
-	end
-	return table.concat(names, ", ")
+    local names = {}
+    for part in params:gmatch("[^,]+") do
+        local name = trim(part):match("^([%a_][%w_]*)")
+        if name then table.insert(names, name) end
+    end
+    return table.concat(names, ", ")
 end
 
 local function replaceSuper(source: string, base: string): string
-	local masked = maskNonCode(source)
-	local positions = {}
-	local cursor = 1
+    local masked = maskNonCode(source)
+    local positions = {}
+    local cursor = 1
 
-	while true do
-		local start, finish, method = masked:find("%f[%w]super%s*:%s*([%a_][%w_]*)%s*%(", cursor)
-		if not start then break end
-		local open = finish
-		local depth = 1
-		local close = nil
-		for index = open + 1, #masked do
-			local char = masked:sub(index, index)
-			if char == "(" then depth += 1 end
-			if char == ")" then depth -= 1 end
-			if depth == 0 then close = index; break end
-		end
-		if not close then error(`Unclosed super:{method}(`) end
-		local args = trim(source:sub(open + 1, close - 1))
-		local replacement = base .. "." .. method .. "(self" .. (args ~= "" and ", " .. args or "") .. ")"
-		table.insert(positions, {Start = start, Finish = close, Replacement = replacement})
-		cursor = close + 1
-	end
-	for index = #positions, 1, -1 do
-		local item = positions[index]
-		source = source:sub(1, item.Start - 1) .. item.Replacement .. source:sub(item.Finish + 1)
-	end
+    while true do
+        local start, finish, method = masked:find("%f[%w]super%s*:%s*([%a_][%w_]*)%s*%(", cursor)
+        if not start then break end
+        local open = finish
+        local depth = 1
+        local close = nil
+        for index = open + 1, #masked do
+            local char = masked:sub(index, index)
+            if char == "(" then depth += 1 end
+            if char == ")" then depth -= 1 end
+            if depth == 0 then close = index; break end
+        end
+        if not close then error(`Unclosed super:{method}(`) end
+        local args = trim(source:sub(open + 1, close - 1))
+        local replacement = base .. "." .. method .. "(self" .. (args ~= "" and ", " .. args or "") .. ")"
+        table.insert(positions, {Start = start, Finish = close, Replacement = replacement})
+        cursor = close + 1
+    end
+    for index = #positions, 1, -1 do
+        local item = positions[index]
+        source = source:sub(1, item.Start - 1) .. item.Replacement .. source:sub(item.Finish + 1)
+    end
 
-	masked = maskNonCode(source)
-	local changes = {}
-	for start, method in masked:gmatch("()super%s*%.%s*([%a_][%w_]*)") do
-		local prefix = masked:sub(1, start - 1)
-		local original = masked:sub(start):match("^super%s*%.%s*[%a_][%w_]*")
-		table.insert(changes, {Start = start, Finish = start + #original - 1, Replacement = base .. "." .. method})
-	end
-	for index = #changes, 1, -1 do
-		local item = changes[index]
-		source = source:sub(1, item.Start - 1) .. item.Replacement .. source:sub(item.Finish + 1)
-	end
-	return source
+    masked = maskNonCode(source)
+    local changes = {}
+    for start, method in masked:gmatch("()super%s*%.%s*([%a_][%w_]*)") do
+        local prefix = masked:sub(1, start - 1)
+        local original = masked:sub(start):match("^super%s*%.%s*[%a_][%w_]*")
+        table.insert(changes, {Start = start, Finish = start + #original - 1, Replacement = base .. "." .. method})
+    end
+    for index = #changes, 1, -1 do
+        local item = changes[index]
+        source = source:sub(1, item.Start - 1) .. item.Replacement .. source:sub(item.Finish + 1)
+    end
+    return source
 end
 
 local function transpileClasses(source: string): string
-	while true do
-		local start = findKeyword(source, "class")
-		if not start then return source end
-		local lineStart = (source:sub(1, start - 1):match(".*()\n") or 0) + 1
-		local prefix = trim(source:sub(lineStart, start - 1))
-		if prefix ~= "" and prefix ~= "final" and prefix ~= "abstract" then error(`Invalid class modifier '{prefix}'`) end
-		local declarationStart = prefix ~= "" and lineStart or start
-		local headerEnd = source:find("\n", start, true)
-		if not headerEnd then error("Class body expected") end
-		local header = trim(source:sub(start, headerEnd - 1))
-		local name, base = header:match("^class%s+([%a_][%w_]*)%s+extends%s+([%a_][%w_%.]*)$")
-		if not name then name = header:match("^class%s+([%a_][%w_]*)$") end
-		if not name then error(`Invalid class declaration: {header}`) end
-		local closing = findBlock(source, start)
-		local body = source:sub(headerEnd + 1, closing.Start - 1)
-		local lines = splitLines(body)
-		local fields, statics, methods, getters, setters, operators, signals = {}, {}, {}, {}, {}, {}, {}
-		local attributes = {}
-		local names = {}
-		local ctor = nil
-		local index = 1
+    while true do
+        local start = findKeyword(source, "class")
+        if not start then return source end
+        local lineStart = (source:sub(1, start - 1):match(".*()\n") or 0) + 1
+        local prefix = trim(source:sub(lineStart, start - 1))
+        if prefix ~= "" and prefix ~= "final" and prefix ~= "abstract" then error(`Invalid class modifier '{prefix}'`) end
+        local declarationStart = prefix ~= "" and lineStart or start
+        local headerEnd = source:find("\n", start, true)
+        if not headerEnd then error("Class body expected") end
+        local header = trim(source:sub(start, headerEnd - 1))
+        local name, base = header:match("^class%s+([%a_][%w_]*)%s+extends%s+([%a_][%w_%.]*)$")
+        if not name then name = header:match("^class%s+([%a_][%w_]*)$") end
+        if not name then error(`Invalid class declaration: {header}`) end
+        local closing = findBlock(source, start)
+        local body = source:sub(headerEnd + 1, closing.Start - 1)
+        local lines = splitLines(body)
+        local fields, statics, methods, getters, setters, operators, signals, lazies, watchers = {}, {}, {}, {}, {}, {}, {}, {}, {}
+        local attributes = {}
+        local names = {}
+        local ctor = nil
+        local index = 1
 
-		while index <= #lines do
-			local row = lines[index]
-			local headerText = trim(row.Text)
-			if headerText == "" or headerText:match("^%-%-") then
-				index += 1
-				continue
-			end
-			if headerText:match("^@") then
-				table.insert(attributes, headerText)
-				index += 1
-				continue
-			end
-			local modifiers, remainder = parseModifiers(headerText)
-			local kind, memberName, params = nil, nil, nil
-			if not kind then
-				for _, possible in {"async function", "function", "get", "set"} do
-					memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")
-					if memberName then kind = possible; break end
-				end
-			end
-			if not kind then
-				for _, possible in {"async function", "function", "get", "set"} do
-					memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*:%s*.+$")
-					if memberName then kind = possible; break end
-				end
-			end
-			local operatorSymbol, operatorParams = remainder:match("^operator%s+([^%s%(]+)%s*%(([^)]*)%)%s*$")
+        while index <= #lines do
+            local row = lines[index]
+            local headerText = trim(row.Text)
+            if headerText == "" or headerText:match("^%-%-") then
+                index += 1
+                continue
+            end
+            if headerText:match("^@") then
+                table.insert(attributes, headerText)
+                index += 1
+                continue
+            end
+            local modifiers, remainder = parseModifiers(headerText)
+            local kind, memberName, params = nil, nil, nil
+            if not kind then
+                for _, possible in {"async function", "function", "get", "set"} do
+                    memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")
+                    if memberName then kind = possible; break end
+                end
+            end
+            if not kind then
+                for _, possible in {"async function", "function", "get", "set"} do
+                    memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*:%s*.+$")
+                    if memberName then kind = possible; break end
+                end
+            end
+            local operatorSymbol, operatorParams = remainder:match("^operator%s+([^%s%(]+)%s*%(([^)]*)%)%s*$")
             if operatorSymbol then
                 local operatorMap = { ["+"] = "__add", ["-"] = "__sub", ["*"] = "__mul", ["/"] = "__div", ["//"] = "__idiv", ["%"] = "__mod", ["^"] = "__pow", [".."] = "__concat", ["=="] = "__eq", ["<"] = "__lt", ["<="] = "__le", ["#"] = "__len" }
                 local metamethod = operatorMap[operatorSymbol]
@@ -377,6 +377,32 @@ local function transpileClasses(source: string): string
                 index = nextIndex or (#lines + 1)
                 continue
             end
+            local watchName, watchParams = remainder:match("^watch%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")
+            if watchName then
+                if next(modifiers) or #attributes > 0 then error("watch cannot use modifiers or attributes") end
+                if watchers[watchName] then error(`Duplicate watcher '{watchName}'`) end
+                local oldParam, newParam = watchParams:match("^%s*([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*$")
+                if not oldParam or not newParam or oldParam == newParam then error("watch requires two distinct parameters: oldValue, newValue") end
+                local at = row.Start + (row.Text:find("watch", 1, true) or 1) - 1
+                local done = findBlock(body, at)
+                local nextLine = body:find("\n", at, true)
+                watchers[watchName] = {Params = watchParams, Body = nextLine and body:sub(nextLine + 1, done.Start - 1) or ""}
+                local nextIndex = nil
+                for pos = index + 1, #lines do
+                    if lines[pos].Start > done.Finish then nextIndex = pos; break end
+                end
+                index = nextIndex or (#lines + 1)
+                continue
+            end
+            local lazyName, lazyValue = remainder:match("^lazy%s+([%a_][%w_]*)%s*=%s*(.+)$")
+            if lazyName then
+                if next(modifiers) or #attributes > 0 then error("lazy cannot use modifiers or attributes") end
+                if names[lazyName] or lazies[lazyName] then error(`Duplicate member '{lazyName}'`) end
+                names[lazyName] = true
+                lazies[lazyName] = lazyValue
+                index += 1
+                continue
+            end
             local signalName = remainder:match("^signal%s+([%a_][%w_]*)$")
             if signalName then
                 if names[signalName] then error(`Duplicate class member '{signalName}'`) end
@@ -387,131 +413,179 @@ local function transpileClasses(source: string): string
                 continue
             end
             local ctorParams = remainder:match("^constructor%s*%(([^)]*)%)%s*$")
-			if kind or ctorParams then
-				local kindStart = row.Start + (row.Text:find(kind or "constructor", 1, true) or 1) - 1
-				local ending = findBlock(body, kindStart)
-				local nextLine = body:find("\n", kindStart, true)
-				local memberBody = nextLine and body:sub(nextLine + 1, ending.Start - 1) or ""
-				local member = {Name = memberName, Kind = kind or "constructor", Params = params or ctorParams,
-					Body = memberBody, Static = modifiers.static == true, Abstract = modifiers.abstract == true,
-					Final = modifiers.final == true, Override = modifiers.override == true, Attributes = table.concat(attributes, "\n")}
-				attributes = {}
-				if member.Kind == "constructor" then
-					if ctor then error(`Duplicate constructor in '{name}'`) end
-					if next(modifiers) then error("Constructor cannot use class member modifiers") end
-					ctor = member
-				elseif member.Kind == "get" or member.Kind == "set" then
-					if member.Static then error("Static getters/setters are not supported") end
-					if member.Kind == "get" and trim(member.Params) ~= "" then error("Getter cannot take parameters") end
-					if member.Kind == "set" and not trim(member.Params):match("^[%a_][%w_]*%s*:?[%w_ ]*$") then error("Setter requires one parameter") end
-					if member.Kind == "get" then table.insert(getters, member) else table.insert(setters, member) end
-				else
-					if names[member.Name] then error(`Duplicate class member '{member.Name}'`) end
-					names[member.Name] = true
-					if member.Override and not base then error(`Cannot override '{member.Name}' without a parent class`) end
-					table.insert(methods, member)
-				end
-				local nextIndex = nil
-				for pos = index + 1, #lines do
-					if lines[pos].Start > ending.Finish then nextIndex = pos; break end
-				end
-				index = nextIndex or (#lines + 1)
-				continue
-			end
-			local field, value = remainder:match("^([%a_][%w_]*)%s*=%s*(.+)$")
-			if not field then field, value = remainder:match("^([%a_][%w_]*)%s*:%s*.-%s*=%s*(.+)$") end
-			if not field then error(`Invalid class member: {headerText}`) end
-			if names[field] then error(`Duplicate class member '{field}'`) end
-			if modifiers.final or modifiers.override or modifiers.abstract then error(`Invalid modifier for field '{field}'`) end
-			if #attributes > 0 then error("Attributes are supported on methods only") end
-			names[field] = true
-			table.insert(modifiers.static and statics or fields, {Name = field, Value = value})
-			index += 1
-		end
+            if kind or ctorParams then
+                local kindStart = row.Start + (row.Text:find(kind or "constructor", 1, true) or 1) - 1
+                local ending = findBlock(body, kindStart)
+                local nextLine = body:find("\n", kindStart, true)
+                local memberBody = nextLine and body:sub(nextLine + 1, ending.Start - 1) or ""
+                local member = {Name = memberName, Kind = kind or "constructor", Params = params or ctorParams,
+                    Body = memberBody, Static = modifiers.static == true, Abstract = modifiers.abstract == true,
+                    Final = modifiers.final == true, Override = modifiers.override == true, Attributes = table.concat(attributes, "\n")}
+                attributes = {}
+                if member.Kind == "constructor" then
+                    if ctor then error(`Duplicate constructor in '{name}'`) end
+                    if next(modifiers) then error("Constructor cannot use class member modifiers") end
+                    ctor = member
+                elseif member.Kind == "get" or member.Kind == "set" then
+                    if member.Static then error("Static getters/setters are not supported") end
+                    if member.Kind == "get" and trim(member.Params) ~= "" then error("Getter cannot take parameters") end
+                    if member.Kind == "set" and not trim(member.Params):match("^[%a_][%w_]*%s*:?[%w_ ]*$") then error("Setter requires one parameter") end
+                    if member.Kind == "get" then table.insert(getters, member) else table.insert(setters, member) end
+                else
+                    if names[member.Name] then error(`Duplicate class member '{member.Name}'`) end
+                    names[member.Name] = true
+                    if member.Override and not base then error(`Cannot override '{member.Name}' without a parent class`) end
+                    table.insert(methods, member)
+                end
+                local nextIndex = nil
+                for pos = index + 1, #lines do
+                    if lines[pos].Start > ending.Finish then nextIndex = pos; break end
+                end
+                index = nextIndex or (#lines + 1)
+                continue
+            end
+            local field, value = remainder:match("^([%a_][%w_]*)%s*=%s*(.+)$")
+            if not field then field, value = remainder:match("^([%a_][%w_]*)%s*:%s*.-%s*=%s*(.+)$") end
+            if not field then error(`Invalid class member: {headerText}`) end
+            if names[field] then error(`Duplicate class member '{field}'`) end
+            if modifiers.final or modifiers.override or modifiers.abstract then error(`Invalid modifier for field '{field}'`) end
+            if #attributes > 0 then error("Attributes are supported on methods only") end
+            names[field] = true
+            table.insert(modifiers.static and statics or fields, {Name = field, Value = value})
+            index += 1
+        end
 
-		local properties = {}
-		for _, member in getters do properties[member.Name] = true end
-		for _, member in setters do properties[member.Name] = true end
-		for _, field in fields do
-			if properties[field.Name] then error(`Property '{field.Name}' conflicts with a field`) end
-		end
+        local properties = {}
+        for _, member in getters do properties[member.Name] = true end
+        for _, member in setters do properties[member.Name] = true end
+        for _, field in fields do
+            if properties[field.Name] or lazies[field.Name] then error(`Property '{field.Name}' conflicts with a field`) end
+        end
+        for lazyName in lazies do
+            if properties[lazyName] then error(`Lazy member '{lazyName}' conflicts with getter/setter`) end
+        end
+        local availableFields = {}
+        for _, field in fields do availableFields[field.Name] = true end
+        for lazyName in lazies do availableFields[lazyName] = true end
+        for watchName in watchers do
+            if properties[watchName] then error(`Watched member '{watchName}' conflicts with getter/setter`) end
+            if not availableFields[watchName] then error(`watch '{watchName}' requires a declared instance field or lazy property`) end
+        end
 
-		local ctorBody = ctor and ctor.Body or ""
-		local parentInit = base and `{base}.__init(self{ctor and trim(ctor.Params) ~= "" and ", " .. getParams(ctor.Params) or ""})` or nil
-		if base and ctor then
-			local ctorLines = splitLines(ctorBody)
-			for _, row in ctorLines do
-				local text = trim(row.Text)
-				if text ~= "" and not text:match("^%-%-") then
-					local args = text:match("^super%s*%((.*)%)%s*$")
-					if args then
-						parentInit = `{base}.__init(self{trim(args) ~= "" and ", " .. args or ""})`
-						ctorBody = ctorBody:sub(1, row.Start - 1) .. ctorBody:sub(row.Finish + 1)
-					end
-					break
-				end
-			end
-		end
-		if maskNonCode(ctorBody):find("super%s*%(") then error("super(...) must be first in constructor") end
-		if base then ctorBody = replaceSuper(ctorBody, base) end
-		if not base and maskNonCode(ctorBody):find("super%s*[:%.%(%[]") then error("super requires a parent class") end
+        local ctorBody = ctor and ctor.Body or ""
+        local parentInit = base and `{base}.__init(self{ctor and trim(ctor.Params) ~= "" and ", " .. getParams(ctor.Params) or ""})` or nil
+        if base and ctor then
+            local ctorLines = splitLines(ctorBody)
+            for _, row in ctorLines do
+                local text = trim(row.Text)
+                if text ~= "" and not text:match("^%-%-") then
+                    local args = text:match("^super%s*%((.*)%)%s*$")
+                    if args then
+                        parentInit = `{base}.__init(self{trim(args) ~= "" and ", " .. args or ""})`
+                        ctorBody = ctorBody:sub(1, row.Start - 1) .. ctorBody:sub(row.Finish + 1)
+                    end
+                    break
+                end
+            end
+        end
+        if maskNonCode(ctorBody):find("super%s*%(") then error("super(...) must be first in constructor") end
+        if base then ctorBody = replaceSuper(ctorBody, base) end
+        if not base and maskNonCode(ctorBody):find("super%s*[:%.%(%[]") then error("super requires a parent class") end
 
-		local generated = {"local " .. name .. " = {}"}
-		if base then
-			table.insert(generated, `if {base}.__final then error("Cannot extend final class '{base}'") end`)
-			table.insert(generated, "setmetatable(" .. name .. ", {__index = " .. base .. "})")
-		end
-		table.insert(generated, `{name}.__final = {tostring(prefix == "final")}`)
-		table.insert(generated, `{name}.__abstract = {tostring(prefix == "abstract")}`)
-		local finalEntries = {}
-		for _, method in methods do
-			if method.Final then table.insert(finalEntries, `["{method.Name}"] = true`) end
-		end
-		local finalTable = "{" .. table.concat(finalEntries, ", ") .. "}"
-		local finalMethods = base and ("setmetatable(" .. finalTable .. ", {__index = " .. base .. ".__finalMethods})") or finalTable
-		table.insert(generated, `{name}.__finalMethods = {finalMethods}`)
-		table.insert(generated, name .. ".__getters = " .. (base and ("setmetatable({}, {__index = " .. base .. ".__getters})") or "{}"))
-		table.insert(generated, name .. ".__setters = " .. (base and ("setmetatable({}, {__index = " .. base .. ".__setters})") or "{}"))
-		table.insert(generated, `{name}.__index = function(self, key)`)
-		table.insert(generated, `    local getter = {name}.__getters[key]`)
-		table.insert(generated, `    if getter then return getter(self) end`)
-		table.insert(generated, `    return {name}[key]`)
-		table.insert(generated, `end`)
-		table.insert(generated, `{name}.__newindex = function(self, key, value)`)
-		table.insert(generated, `    local setter = {name}.__setters[key]`)
-		table.insert(generated, `    if setter then setter(self, value); return end`)
-		table.insert(generated, `    if {name}.__getters[key] then error("Cannot assign to read-only property: " .. key) end`)
-		table.insert(generated, `    rawset(self, key, value)`)
-		table.insert(generated, `end`)
-		for _, field in statics do table.insert(generated, `{name}.{field.Name} = {transpileSource(field.Value)}`) end
-		table.insert(generated, `function {name}.__init(self{ctor and trim(ctor.Params) ~= "" and ", " .. ctor.Params or ""})`)
-		if parentInit then table.insert(generated, "    " .. parentInit) end
-		for _, field in fields do table.insert(generated, `    self.{field.Name} = {transpileSource(field.Value)}`) end
+        local generated = {"local " .. name .. " = {}"}
+        if base then
+            table.insert(generated, `if {base}.__final then error("Cannot extend final class '{base}'") end`)
+            table.insert(generated, "setmetatable(" .. name .. ", {__index = " .. base .. "})")
+        end
+        table.insert(generated, `{name}.__final = {tostring(prefix == "final")}`)
+        table.insert(generated, `{name}.__abstract = {tostring(prefix == "abstract")}`)
+        local finalEntries = {}
+        for _, method in methods do
+            if method.Final then table.insert(finalEntries, `["{method.Name}"] = true`) end
+        end
+        local finalTable = "{" .. table.concat(finalEntries, ", ") .. "}"
+        local finalMethods = base and ("setmetatable(" .. finalTable .. ", {__index = " .. base .. ".__finalMethods})") or finalTable
+        table.insert(generated, `{name}.__finalMethods = {finalMethods}`)
+        table.insert(generated, name .. ".__getters = " .. (base and ("setmetatable({}, {__index = " .. base .. ".__getters})") or "{}"))
+        table.insert(generated, name .. ".__setters = " .. (base and ("setmetatable({}, {__index = " .. base .. ".__setters})") or "{}"))
+        table.insert(generated, name .. ".__lazy = " .. (base and ("setmetatable({}, {__index = " .. base .. ".__lazy})") or "{}"))
+        table.insert(generated, name .. ".__watchers = " .. (base and ("setmetatable({}, {__index = " .. base .. ".__watchers})") or "{}"))
+        table.insert(generated, name .. ".__watchedFields = " .. (base and ("setmetatable({}, {__index = " .. base .. ".__watchedFields})") or "{}"))
+        for watchName in watchers do table.insert(generated, `{name}.__watchedFields["{watchName}"] = true`) end
+        table.insert(generated, `{name}.__index = function(self, key)`)
+        table.insert(generated, `    local getter = {name}.__getters[key]`)
+        table.insert(generated, `    if getter then return getter(self) end`)
+        table.insert(generated, `    local lazy = {name}.__lazy[key]`)
+        table.insert(generated, `    if lazy then`)
+        table.insert(generated, `        if not self.__lauaInitialized[key] then`)
+        table.insert(generated, `            self.__lauaInitialized[key] = true`)
+        table.insert(generated, `            local ok, value = pcall(lazy, self)`)
+        table.insert(generated, `            if not ok then self.__lauaInitialized[key] = nil; error(value, 0) end`)
+        table.insert(generated, `            self.__lauaValues[key] = value`)
+        table.insert(generated, `        end`)
+        table.insert(generated, `        return self.__lauaValues[key]`)
+        table.insert(generated, `    end`)
+        table.insert(generated, `    if {name}.__watchedFields[key] then return self.__lauaValues[key] end`)
+        table.insert(generated, `    return {name}[key]`)
+        table.insert(generated, `end`)
+        table.insert(generated, `{name}.__newindex = function(self, key, value)`)
+        table.insert(generated, `    local setter = {name}.__setters[key]`)
+        table.insert(generated, `    if setter then setter(self, value); return end`)
+        table.insert(generated, `    if {name}.__getters[key] then error("Cannot assign to read-only property: " .. key) end`)
+        table.insert(generated, `    if {name}.__watchedFields[key] or {name}.__lazy[key] then`)
+        table.insert(generated, `        local oldValue = self.__lauaValues[key]`)
+        table.insert(generated, `        if {name}.__lazy[key] and not self.__lauaInitialized[key] then self.__lauaInitialized[key] = true end`)
+        table.insert(generated, `        self.__lauaValues[key] = value`)
+        table.insert(generated, `        local watcher = {name}.__watchers[key]`)
+        table.insert(generated, `        if watcher and oldValue ~= value then watcher(self, oldValue, value) end`)
+        table.insert(generated, `        return`)
+        table.insert(generated, `    end`)
+        table.insert(generated, `    rawset(self, key, value)`)
+        table.insert(generated, `end`)
+        for lazyName, lazyValue in lazies do
+            table.insert(generated, `{name}.__lazy["{lazyName}"] = function(self) return {transpileSource(lazyValue)} end`)
+        end
+        for watchName, watcher in watchers do
+            table.insert(generated, `{name}.__watchers["{watchName}"] = function(self, {watcher.Params})`)
+            local code = normalized(transpileSource(base and replaceSuper(watcher.Body, base) or watcher.Body), "    ")
+            if code ~= "" then table.insert(generated, code) end
+            table.insert(generated, "end")
+        end
+        for _, field in statics do table.insert(generated, `{name}.{field.Name} = {transpileSource(field.Value)}`) end
+        table.insert(generated, `function {name}.__init(self{ctor and trim(ctor.Params) ~= "" and ", " .. ctor.Params or ""})`)
+        if parentInit then table.insert(generated, "    " .. parentInit) end
+        for _, field in fields do
+            if watchers[field.Name] then
+                table.insert(generated, `    self.__lauaValues["{field.Name}"] = {transpileSource(field.Value)}`)
+            else
+                table.insert(generated, `    self.{field.Name} = {transpileSource(field.Value)}`)
+            end
+        end
         for _, signalName in signals do table.insert(generated, `    self.{signalName} = __lauaSignal.new()`) end
-		local innerCtor = normalized(transpileSource(ctorBody), "    ")
-		if innerCtor ~= "" then table.insert(generated, innerCtor) end
-		table.insert(generated, "end")
-		table.insert(generated, `function {name}.new(...)`)
-		table.insert(generated, `    if {name}.__abstract then error("Cannot instantiate abstract class '{name}'") end`)
-		table.insert(generated, "    local self = setmetatable({}, " .. name .. ")")
-		table.insert(generated, `    {name}.__init(self, ...)`)
-		table.insert(generated, "    return self")
-		table.insert(generated, "end")
-		for _, member in getters do
-			local nested = base and replaceSuper(member.Body, base) or member.Body
-			table.insert(generated, `{name}.__getters.{member.Name} = function(self)`)
-			local code = normalized(transpileSource(nested), "    ")
-			if code ~= "" then table.insert(generated, code) end
-			table.insert(generated, "end")
-		end
-		for _, member in setters do
-			local nested = base and replaceSuper(member.Body, base) or member.Body
-			table.insert(generated, `{name}.__setters.{member.Name} = function(self, {member.Params})`)
-			local code = normalized(transpileSource(nested), "    ")
-			if code ~= "" then table.insert(generated, code) end
-			table.insert(generated, "end")
-		end
-		for _, operator in operators do
+        local innerCtor = normalized(transpileSource(ctorBody), "    ")
+        if innerCtor ~= "" then table.insert(generated, innerCtor) end
+        table.insert(generated, "end")
+        table.insert(generated, `function {name}.new(...)`)
+        table.insert(generated, `    if {name}.__abstract then error("Cannot instantiate abstract class '{name}'") end`)
+        table.insert(generated, "    local self = setmetatable({__lauaValues = {}, __lauaInitialized = {}}, " .. name .. ")")
+        table.insert(generated, `    {name}.__init(self, ...)`)
+        table.insert(generated, "    return self")
+        table.insert(generated, "end")
+        for _, member in getters do
+            local nested = base and replaceSuper(member.Body, base) or member.Body
+            table.insert(generated, `{name}.__getters.{member.Name} = function(self)`)
+            local code = normalized(transpileSource(nested), "    ")
+            if code ~= "" then table.insert(generated, code) end
+            table.insert(generated, "end")
+        end
+        for _, member in setters do
+            local nested = base and replaceSuper(member.Body, base) or member.Body
+            table.insert(generated, `{name}.__setters.{member.Name} = function(self, {member.Params})`)
+            local code = normalized(transpileSource(nested), "    ")
+            if code ~= "" then table.insert(generated, code) end
+            table.insert(generated, "end")
+        end
+        for _, operator in operators do
             local nested = base and replaceSuper(operator.Body, base) or operator.Body
             table.insert(generated, `function {name}.{operator.Name}(self{trim(operator.Params) ~= "" and ", " .. operator.Params or ""})`)
             local code = normalized(transpileSource(nested), "    ")
@@ -519,75 +593,102 @@ local function transpileClasses(source: string): string
             table.insert(generated, "end")
         end
         for _, method in methods do
-			if base then table.insert(generated, `if {base}.__finalMethods and {base}.__finalMethods["{method.Name}"] then error("Cannot override final method '{method.Name}'") end`) end
-			if base and method.Override then table.insert(generated, `if not {base}.{method.Name} then error("No inherited method '{method.Name}' to override") end`) end
-			local nested = base and replaceSuper(method.Body, base) or method.Body
-			table.insert(generated, `{method.Attributes ~= "" and method.Attributes .. "\n" or ""}{method.Kind == "async function" and "async " or ""}function {name}{method.Static and "." or ":"}{method.Name}({method.Params})`)
-			local code = normalized(transpileSource(nested), "    ")
-			if method.Abstract then
-				table.insert(generated, `    error("Abstract method '{method.Name}' must be overridden")`)
-			elseif code ~= "" then
-				table.insert(generated, code)
-			end
-			table.insert(generated, "end")
-		end
-		source = source:sub(1, declarationStart - 1) .. table.concat(generated, "\n") .. source:sub(closing.Finish + 1)
-	end
+            if base then table.insert(generated, `if {base}.__finalMethods and {base}.__finalMethods["{method.Name}"] then error("Cannot override final method '{method.Name}'") end`) end
+            if base and method.Override then table.insert(generated, `if not {base}.{method.Name} then error("No inherited method '{method.Name}' to override") end`) end
+            local nested = base and replaceSuper(method.Body, base) or method.Body
+            table.insert(generated, `{method.Attributes ~= "" and method.Attributes .. "\n" or ""}{method.Kind == "async function" and "async " or ""}function {name}{method.Static and "." or ":"}{method.Name}({method.Params})`)
+            local code = normalized(transpileSource(nested), "    ")
+            if method.Abstract then
+                table.insert(generated, `    error("Abstract method '{method.Name}' must be overridden")`)
+            elseif code ~= "" then
+                table.insert(generated, code)
+            end
+            table.insert(generated, "end")
+        end
+        source = source:sub(1, declarationStart - 1) .. table.concat(generated, "\n") .. source:sub(closing.Finish + 1)
+    end
 end
 
 local function transpileNamespaces(source: string): string
-	while true do
-		local start = findKeyword(source, "namespace")
-		if not start then return source end
-		local headerEnd = source:find("\n", start, true)
-		if not headerEnd then error("Namespace body expected") end
-		local name = trim(source:sub(start, headerEnd - 1)):match("^namespace%s+([%a_][%w_]*)$")
-		if not name then error("Invalid namespace declaration") end
-		local closing = findBlock(source, start)
-		local body = source:sub(headerEnd + 1, closing.Start - 1)
-		local output = {}
-		local depth = 0
-		for _, line in splitLines(body) do
-			local raw = line.Text
-			local code = trim(maskNonCode(raw))
-			local fn = depth == 0 and (code:match("^function%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$") or code:match("^async%s+function%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")) or nil
-			local field = depth == 0 and code:match("^([%a_][%w_]*)%s*=%s*.+$") or nil
-			if fn then
-				local newLine = raw:gsub("function%s+" .. fn, "function " .. name .. "." .. fn, 1)
-				table.insert(output, newLine)
-			elseif field then
-				local newLine = raw:gsub("^([ \t]*)" .. field, "%1" .. name .. "." .. field, 1)
-				table.insert(output, newLine)
-			else
-				table.insert(output, raw)
-			end
-			if blockStart(code) then depth += 1 end
-			if code:match("^end%s*;?%s*$") or code:match("^until%s+") then depth -= 1 end
-		end
-		local transformed = normalized(transpileSource(table.concat(output, "\n")), "    ")
-		local expression = "(function()\n    local " .. name .. " = {}\n" .. transformed .. "\n    return " .. name .. "\nend)()"
-		local lineStart = (source:sub(1, start - 1):match(".*()\n") or 0) + 1
-		local prefix = trim(source:sub(lineStart, start - 1))
-		if prefix == "return" then
-			source = source:sub(1, start - 1) .. expression .. source:sub(closing.Finish + 1)
-		elseif prefix == "" then
-			source = source:sub(1, start - 1) .. `local {name} = {expression}` .. source:sub(closing.Finish + 1)
-		else
-			error("namespace must be standalone or directly returned")
-		end
-	end
+    while true do
+        local start = findKeyword(source, "namespace")
+        if not start then return source end
+        local headerEnd = source:find("\n", start, true)
+        if not headerEnd then error("Namespace body expected") end
+        local name = trim(source:sub(start, headerEnd - 1)):match("^namespace%s+([%a_][%w_]*)$")
+        if not name then error("Invalid namespace declaration") end
+        local closing = findBlock(source, start)
+        local body = source:sub(headerEnd + 1, closing.Start - 1)
+        local output = {}
+        local depth = 0
+        for _, line in splitLines(body) do
+            local raw = line.Text
+            local code = trim(maskNonCode(raw))
+            local fn = depth == 0 and (code:match("^function%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$") or code:match("^async%s+function%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")) or nil
+            local field = depth == 0 and code:match("^([%a_][%w_]*)%s*=%s*.+$") or nil
+            if fn then
+                local newLine = raw:gsub("function%s+" .. fn, "function " .. name .. "." .. fn, 1)
+                table.insert(output, newLine)
+            elseif field then
+                local newLine = raw:gsub("^([ \t]*)" .. field, "%1" .. name .. "." .. field, 1)
+                table.insert(output, newLine)
+            else
+                table.insert(output, raw)
+            end
+            if blockStart(code) then depth += 1 end
+            if code:match("^end%s*;?%s*$") or code:match("^until%s+") then depth -= 1 end
+        end
+        local transformed = normalized(transpileSource(table.concat(output, "\n")), "    ")
+        local expression = "(function()\n    local " .. name .. " = {}\n" .. transformed .. "\n    return " .. name .. "\nend)()"
+        local lineStart = (source:sub(1, start - 1):match(".*()\n") or 0) + 1
+        local prefix = trim(source:sub(lineStart, start - 1))
+        if prefix == "return" then
+            source = source:sub(1, start - 1) .. expression .. source:sub(closing.Finish + 1)
+        elseif prefix == "" then
+            source = source:sub(1, start - 1) .. `local {name} = {expression}` .. source:sub(closing.Finish + 1)
+        else
+            error("namespace must be standalone or directly returned")
+        end
+    end
 end
 
 transpileSource = function(source: string): string
-	source = transpileEnums(source)
-	source = transpileNamespaces(source)
-	source = transpileClasses(source)
-	source = transpileNew(source)
-	return source
+    source = transpileEnums(source)
+    source = transpileNamespaces(source)
+    source = transpileClasses(source)
+    source = transpileNew(source)
+    return source
 end
 
 local function replaceRange(source: string, first: number, last: number, replacement: string): string
     return source:sub(1, first - 1) .. replacement .. source:sub(last + 1)
+end
+
+local function transpileExports(source: string): (string, {string})
+    local names = {}
+    local seen = {}
+    local rows = {}
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        local masked = trim(maskNonCode(raw))
+        if not masked:match("^export%s+") or masked:match("^export%s+type%s+") then
+            table.insert(rows, raw)
+            continue
+        end
+        local indent, rest = raw:match("^([ \t]*)export%s+(.+)$")
+        if not rest then error("Invalid export statement") end
+        local name = rest:match("^final%s+class%s+([%a_][%w_]*)") or rest:match("^abstract%s+class%s+([%a_][%w_]*)")
+            or rest:match("^class%s+([%a_][%w_]*)") or rest:match("^enum%s+([%a_][%w_]*)")
+            or rest:match("^namespace%s+([%a_][%w_]*)") or rest:match("^async%s+function%s+([%a_][%w_]*)")
+            or rest:match("^function%s+([%a_][%w_]*)") or rest:match("^local%s+function%s+([%a_][%w_]*)")
+            or rest:match("^local%s+async%s+function%s+([%a_][%w_]*)") or rest:match("^local%s+([%a_][%w_]*)%s*=") or rest:match("^local%s+([%a_][%w_]*)%s*:%s*.-%s*=")
+        if not name then error(`Unsupported export declaration: {rest}`) end
+        if seen[name] then error(`Duplicate export '{name}'`) end
+        seen[name] = true
+        table.insert(names, name)
+        table.insert(rows, indent .. rest)
+    end
+    return table.concat(rows, "\n"), names
 end
 
 local function transpileImports(source: string): string
@@ -601,7 +702,10 @@ local function transpileImports(source: string): string
         end
         local name, path = line:match('^import%s+([%a_][%w_]*)%s+from%s+"([^"\n]+)"%s*$')
         if not name then name, path = line:match("^import%s+([%a_][%w_]*)%s+from%s+'([^'\n]+)'%s*$") end
-        if not name or not path then error("Expected import Name from \"./Module\"") end
+        local named, namedPath = line:match('^import%s+%{(.-)%}%s+from%s+"([^"\n]+)"%s*$')
+        if not named then named, namedPath = line:match("^import%s+%{(.-)%}%s+from%s+'([^'\n]+)'%s*$") end
+        if not name and not named then error("Expected import Name or import {Name} from \"./Module\"") end
+        path = path or namedPath
         if path:sub(1, 2) ~= "./" and path:sub(1, 3) ~= "../" then error("Import path must be relative to script: ./ or ../") end
         local current = "script.Parent"
         local rest = path
@@ -615,7 +719,24 @@ local function transpileImports(source: string): string
             if not segment:match("^[%a_][%w_]*$") then error(`Invalid module path segment '{segment}'`) end
             current ..= `:WaitForChild("{segment}")`
         end
-        table.insert(result, (raw:match("^[ \t]*") or "") .. `local {name} = require({current})`)
+        local indent = raw:match("^[ \t]*") or ""
+        if named then
+            local locals = {}
+            local used = {}
+            for segment in named:gmatch("[^,]+") do
+                local external, alias = trim(segment):match("^([%a_][%w_]*)%s+as%s+([%a_][%w_]*)$")
+                if not external then external = trim(segment); alias = external end
+                if not external:match("^[%a_][%w_]*$") or used[alias] then error(`Invalid or duplicate import '{segment}'`) end
+                used[alias] = true
+                table.insert(locals, {External = external, Local = alias})
+            end
+            if #locals == 0 then error("Named import cannot be empty") end
+            local temporary = `__lauaImported{#result + 1}`
+            table.insert(result, indent .. `local {temporary} = require({current})`)
+            for _, entry in locals do table.insert(result, indent .. `local {entry.Local} = {temporary}.{entry.External}`) end
+        else
+            table.insert(result, indent .. `local {name} = require({current})`)
+        end
     end
     return table.concat(result, "\n")
 end
@@ -644,6 +765,53 @@ local function transpileDestructuring(source: string): string
         end
     end
     return table.concat(result, "\n")
+end
+
+local function splitPatternFields(source: string): {string}
+    local fields = {}
+    local depth = 0
+    local start = 1
+    local masked = maskNonCode(source)
+    for index = 1, #masked do
+        local char = masked:sub(index, index)
+        if char == "{" then depth += 1 end
+        if char == "}" then depth -= 1 end
+        if depth < 0 then error("Invalid match table pattern") end
+        if char == "," and depth == 0 then
+            table.insert(fields, trim(source:sub(start, index - 1)))
+            start = index + 1
+        end
+    end
+    if depth ~= 0 then error("Unclosed match table pattern") end
+    table.insert(fields, trim(source:sub(start)))
+    return fields
+end
+
+local function matchPatternCondition(value: string, pattern: string): string
+    pattern = trim(pattern)
+    if pattern:sub(1, 1) ~= "{" then return `{value} == {pattern}` end
+    if pattern:sub(-1) ~= "}" then error("Unclosed match table pattern") end
+    local parts = {`type({value}) == "table"`}
+    local contents = trim(pattern:sub(2, -2))
+    if contents == "" then return `({table.concat(parts, " and ")})` end
+    local fields = splitPatternFields(contents)
+    local seen = {}
+    for _, part in fields do
+        local name, expected = part:match("^([%a_][%w_]*)%s*=%s*(.+)$")
+        if not name then error(`Invalid match table pattern field: {part}`) end
+        if seen[name] then error(`Duplicate match table field '{name}'`) end
+        seen[name] = true
+        table.insert(parts, matchPatternCondition(value .. "." .. name, expected))
+    end
+    return "(" .. table.concat(parts, " and ") .. ")"
+end
+
+local function matchBranchCondition(value: string, expression: string): string
+    local pattern, guard = expression:match("^(.-)%s+if%s+(.+)$")
+    if not pattern then pattern = expression end
+    local condition = matchPatternCondition(value, pattern)
+    if guard then condition ..= " and (" .. guard .. ")" end
+    return condition
 end
 
 local function transpileMatches(source: string): string
@@ -696,7 +864,7 @@ local function transpileMatches(source: string): string
             if branch.Default then
                 table.insert(generated, "    else")
             else
-                table.insert(generated, `    {index == 1 and "if" or "elseif"} {variable} == {branch.Value} then`)
+                table.insert(generated, `    {index == 1 and "if" or "elseif"} {matchBranchCondition(variable, branch.Value)} then`)
             end
             local content = normalized(table.concat(branch.Lines, "\n"), "        ")
             if content ~= "" then table.insert(generated, content) end
@@ -803,6 +971,43 @@ local function transpileOptional(source: string): (string, boolean)
     end
 end
 
+local function transpileCoalescingAssign(source: string): string
+    local output = {}
+    local serial = 0
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        local masked = maskNonCode(raw)
+        local at = masked:find("??=", 1, true)
+        if not at then
+            table.insert(output, raw)
+            continue
+        end
+        local indent = raw:match("^[ \t]*") or ""
+        local target = trim(raw:sub(1, at - 1))
+        local fallback = trim(raw:sub(at + 3))
+        if fallback == "" then error("??= requires a fallback value") end
+        local closure = fallback:find("--", 1, true) and ("\n" .. indent .. "end") or " end"
+        if target:match("^[%a_][%w_]*$") then
+            table.insert(output, indent .. `if {target} == nil then {target} = {fallback}{closure}`)
+        else
+            serial += 1
+            local receiver, member = target:match("^(.-)%.([%a_][%w_]*)$")
+            local key = nil
+            if not receiver then receiver, key = target:match("^(.-)%[([^%[%]]+)%]$") end
+            if not receiver or trim(receiver) == "" then error("??= expects a variable, property or indexed target") end
+            local temporary = `__lauaAssignTarget{serial}`
+            local index = member and ("." .. member) or (`[{key}]`)
+            if key then
+                local keyTemp = `__lauaAssignKey{serial}`
+                table.insert(output, indent .. `do local {temporary} = {receiver}; local {keyTemp} = {key}; if {temporary}[{keyTemp}] == nil then {temporary}[{keyTemp}] = {fallback}{closure} end`)
+            else
+                table.insert(output, indent .. `do local {temporary} = {receiver}; if {temporary}{index} == nil then {temporary}{index} = {fallback}{closure} end`)
+            end
+        end
+    end
+    return table.concat(output, "\n")
+end
+
 local function transpileCoalescing(source: string): (string, boolean)
     local changed = false
     while true do
@@ -845,55 +1050,55 @@ local function transpileExtensions(source: string): string
 end
 
 local function transpileDefers(source: string): string
-	local functionLines = {}
-	for _, line in splitLines(source) do
-		local code = trim(maskNonCode(line.Text))
-		if code:match("^function%s+") or code:match("^local%s+function%s+") or code:match("^async%s+function%s+") or code:match("^local%s+async%s+function%s+") or code:match("=%s*function%s*%(") then
-			local at = line.Start + (line.Text:find("function", 1, true) or 1) - 1
-			table.insert(functionLines, at)
-		end
-	end
+    local functionLines = {}
+    for _, line in splitLines(source) do
+        local code = trim(maskNonCode(line.Text))
+        if code:match("^function%s+") or code:match("^local%s+function%s+") or code:match("^async%s+function%s+") or code:match("^local%s+async%s+function%s+") or code:match("=%s*function%s*%(") then
+            local at = line.Start + (line.Text:find("function", 1, true) or 1) - 1
+            table.insert(functionLines, at)
+        end
+    end
 
-	for index = #functionLines, 1, -1 do
-		local start = functionLines[index]
-		local closing = findBlock(source, start)
-		local headerEnd = source:find("\n", start, true)
-		if not headerEnd then continue end
-		local body = source:sub(headerEnd + 1, closing.Start - 1)
-		local deferBlocks = {}
-		for _, line in splitLines(body) do
-			if trim(maskNonCode(line.Text)) == "defer" then
-				local at = line.Start + (line.Text:find("defer", 1, true) or 1) - 1
-				local done = findBlock(body, at)
-				local codeStart = body:find("\n", at, true)
-				local content = codeStart and body:sub(codeStart + 1, done.Start - 1) or ""
-				local replacement = `table.insert(__lauaDefers, function()\n{normalized(content, "    ")}\nend)`
-				table.insert(deferBlocks, {Start = at, Finish = done.Finish, Replacement = replacement})
-			end
-		end
-		if #deferBlocks == 0 then continue end
-		for blockIndex = #deferBlocks, 1, -1 do
-			local block = deferBlocks[blockIndex]
-			body = body:sub(1, block.Start - 1) .. block.Replacement .. body:sub(block.Finish + 1)
-		end
-		local wrapped = table.concat({
-			"local __lauaDefers = {}",
-			"local __lauaResult = table.pack(xpcall(function()",
-			normalized(body, "    "),
-			"end, function(err) return err end))",
-			"local __lauaCleanupError = nil",
-			"for __lauaIndex = #__lauaDefers, 1, -1 do",
-			"    local __lauaOK, __lauaError = pcall(__lauaDefers[__lauaIndex])",
-			"    if not __lauaOK and not __lauaCleanupError then __lauaCleanupError = __lauaError end",
-			"end",
-			"if __lauaCleanupError then error(__lauaCleanupError, 0) end",
-			"if not __lauaResult[1] then error(__lauaResult[2], 0) end",
-			"return table.unpack(__lauaResult, 2, __lauaResult.n)",
-		}, "\n")
-		source = source:sub(1, headerEnd) .. wrapped .. "\n" .. source:sub(closing.Start)
-	end
-	if maskNonCode(source):match("%f[%w]defer%f[%W]") then error("defer must be inside a function") end
-	return source
+    for index = #functionLines, 1, -1 do
+        local start = functionLines[index]
+        local closing = findBlock(source, start)
+        local headerEnd = source:find("\n", start, true)
+        if not headerEnd then continue end
+        local body = source:sub(headerEnd + 1, closing.Start - 1)
+        local deferBlocks = {}
+        for _, line in splitLines(body) do
+            if trim(maskNonCode(line.Text)) == "defer" then
+                local at = line.Start + (line.Text:find("defer", 1, true) or 1) - 1
+                local done = findBlock(body, at)
+                local codeStart = body:find("\n", at, true)
+                local content = codeStart and body:sub(codeStart + 1, done.Start - 1) or ""
+                local replacement = `table.insert(__lauaDefers, function()\n{normalized(content, "    ")}\nend)`
+                table.insert(deferBlocks, {Start = at, Finish = done.Finish, Replacement = replacement})
+            end
+        end
+        if #deferBlocks == 0 then continue end
+        for blockIndex = #deferBlocks, 1, -1 do
+            local block = deferBlocks[blockIndex]
+            body = body:sub(1, block.Start - 1) .. block.Replacement .. body:sub(block.Finish + 1)
+        end
+        local wrapped = table.concat({
+            "local __lauaDefers = {}",
+            "local __lauaResult = table.pack(xpcall(function()",
+            normalized(body, "    "),
+            "end, function(err) return err end))",
+            "local __lauaCleanupError = nil",
+            "for __lauaIndex = #__lauaDefers, 1, -1 do",
+            "    local __lauaOK, __lauaError = pcall(__lauaDefers[__lauaIndex])",
+            "    if not __lauaOK and not __lauaCleanupError then __lauaCleanupError = __lauaError end",
+            "end",
+            "if __lauaCleanupError then error(__lauaCleanupError, 0) end",
+            "if not __lauaResult[1] then error(__lauaResult[2], 0) end",
+            "return table.unpack(__lauaResult, 2, __lauaResult.n)",
+        }, "\n")
+        source = source:sub(1, headerEnd) .. wrapped .. "\n" .. source:sub(closing.Start)
+    end
+    if maskNonCode(source):match("%f[%w]defer%f[%W]") then error("defer must be inside a function") end
+    return source
 end
 
 local function transpileUsing(source: string): string
@@ -1063,7 +1268,8 @@ end
 
 function Transpiler.Transpile(source: string, runtimeRequire: string?): string
     assert(type(source) == "string", "Expected Laua source string")
-    local output = transpileDefers(transpileExtensions(transpileSource(transpileUsing(source))))
+    local withoutExports, exportedNames = transpileExports(source)
+    local output = transpileDefers(transpileExtensions(transpileSource(transpileUsing(transpileCoalescingAssign(withoutExports)))))
     local asyncCount
     output, asyncCount = transpileAsyncFunctions(output)
     local awaitCount
@@ -1077,6 +1283,11 @@ function Transpiler.Transpile(source: string, runtimeRequire: string?): string
     end
     if output:find("__lauaSignal.", 1, true) then
         output = insertRuntimeRequire(output, 'require(script.Parent.LauaSignal)'):gsub("local __lauaAsync = require%(script.Parent.LauaSignal%)", "local __lauaSignal = require(script.Parent.LauaSignal)", 1)
+    end
+    if #exportedNames > 0 then
+        local values = {}
+        for _, name in exportedNames do table.insert(values, `{name} = {name}`) end
+        output ..= "\nreturn {" .. table.concat(values, ", ") .. "}"
     end
     return (output:gsub("[ \t]+\n", "\n"))
 end
