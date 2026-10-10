@@ -558,5 +558,3 @@ end
 ## Complete list of Laua additions
 
 `class` · `extends` · `constructor` · `new` · `super` · `public` · `private` · `protected` · `static` · `abstract` · `override` · `final` · `get` · `set` · `namespace` · `enum` · `defer` · `using` · `async` · `await`
-
-*End of Laua-only syntax reference.*
