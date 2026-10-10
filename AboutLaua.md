@@ -17,6 +17,13 @@ Laua currently includes features such as:
 - Method overriding
 - Namespaces
 - Enums
+- `async`
+- `await`
+- `using`
+- `get`
+- `set`
+- `final`
+- `defer`
 
 Example:
 
