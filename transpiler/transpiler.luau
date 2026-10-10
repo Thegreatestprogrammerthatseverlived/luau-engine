@@ -95,6 +95,7 @@ local function blockStart(line: string): boolean
 	if line:match("^abstract%s+class%s+") or line:match("^final%s+class%s+") or line:match("^class%s+") then return true end
 	if line:match("^namespace%s+") or line:match("^return%s+namespace%s+") or line:match("^enum%s+") then return true end
 	if line:match("^constructor%s*%(") or line:match("^defer%s*$") then return true end
+	if line:match("^async%s+function%s+") or line:match("^local%s+async%s+function%s+") then return true end
 	if line:match("^get%s+[%a_][%w_]*%s*%(") or line:match("^set%s+[%a_][%w_]*%s*%(") then return true end
 	if line:match("^function%s+") or line:match("^local%s+function%s+") then return true end
 	if line:match("^.*=%s*function%s*%(") then return true end
@@ -109,7 +110,7 @@ local function blockStart(line: string): boolean
 		end
 		if not found then break end
 	end
-	if remainder:match("^function%s+") or remainder:match("^get%s+[%a_][%w_]*%s*%(") or remainder:match("^set%s+[%a_][%w_]*%s*%(") then return true end
+	if remainder:match("^function%s+") or remainder:match("^async%s+function%s+") or remainder:match("^get%s+[%a_][%w_]*%s*%(") or remainder:match("^set%s+[%a_][%w_]*%s*%(") then return true end
 	return false
 end
 
@@ -342,13 +343,13 @@ local function transpileClasses(source: string): string
 			local modifiers, remainder = parseModifiers(headerText)
 			local kind, memberName, params = nil, nil, nil
 			if not kind then
-				for _, possible in {"function", "get", "set"} do
+				for _, possible in {"async function", "function", "get", "set"} do
 					memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")
 					if memberName then kind = possible; break end
 				end
 			end
 			if not kind then
-				for _, possible in {"function", "get", "set"} do
+				for _, possible in {"async function", "function", "get", "set"} do
 					memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*:%s*.+$")
 					if memberName then kind = possible; break end
 				end
@@ -481,7 +482,7 @@ local function transpileClasses(source: string): string
 			if base then table.insert(generated, `if {base}.__finalMethods and {base}.__finalMethods["{method.Name}"] then error("Cannot override final method '{method.Name}'") end`) end
 			if base and method.Override then table.insert(generated, `if not {base}.{method.Name} then error("No inherited method '{method.Name}' to override") end`) end
 			local nested = base and replaceSuper(method.Body, base) or method.Body
-			table.insert(generated, `{method.Attributes ~= "" and method.Attributes .. "\n" or ""}function {name}{method.Static and "." or ":"}{method.Name}({method.Params})`)
+			table.insert(generated, `{method.Attributes ~= "" and method.Attributes .. "\n" or ""}{method.Kind == "async function" and "async " or ""}function {name}{method.Static and "." or ":"}{method.Name}({method.Params})`)
 			local code = normalized(transpileSource(nested), "    ")
 			if method.Abstract then
 				table.insert(generated, `    error("Abstract method '{method.Name}' must be overridden")`)
@@ -509,7 +510,7 @@ local function transpileNamespaces(source: string): string
 		for _, line in splitLines(body) do
 			local raw = line.Text
 			local code = trim(maskNonCode(raw))
-			local fn = depth == 0 and code:match("^function%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$") or nil
+			local fn = depth == 0 and (code:match("^function%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$") or code:match("^async%s+function%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")) or nil
 			local field = depth == 0 and code:match("^([%a_][%w_]*)%s*=%s*.+$") or nil
 			if fn then
 				local newLine = raw:gsub("function%s+" .. fn, "function " .. name .. "." .. fn, 1)
@@ -549,7 +550,7 @@ local function transpileDefers(source: string): string
 	local functionLines = {}
 	for _, line in splitLines(source) do
 		local code = trim(maskNonCode(line.Text))
-		if code:match("^function%s+") or code:match("^local%s+function%s+") or code:match("=%s*function%s*%(") then
+		if code:match("^function%s+") or code:match("^local%s+function%s+") or code:match("^async%s+function%s+") or code:match("^local%s+async%s+function%s+") or code:match("=%s*function%s*%(") then
 			local at = line.Start + (line.Text:find("function", 1, true) or 1) - 1
 			table.insert(functionLines, at)
 		end
@@ -597,11 +598,167 @@ local function transpileDefers(source: string): string
 	return source
 end
 
-function Transpiler.Transpile(source: string): string
-	assert(type(source) == "string", "Expected Laua source string")
-	local output = transpileDefers(transpileSource(source))
-	local cleaned = output:gsub("[ \t]+\n", "\n")
-	return cleaned
+local function transpileUsing(source: string): string
+    local output = {}
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        local masked = trim(maskNonCode(raw))
+        if masked:match("^using%f[%W]") then
+            local name, expression = trim(raw):match("^using%s+([%a_][%w_]*)%s*=%s*(.+)$")
+            if not name then error("using requires exactly one named resource: using name = expression") end
+            local indent = raw:match("^[ \t]*") or ""
+            local code = {
+                indent .. "local " .. name .. " = " .. expression,
+                indent .. "defer",
+                indent .. "    if " .. name .. " ~= nil then",
+                indent .. "        if typeof(" .. name .. ') == "RBXScriptConnection" then',
+                indent .. "            " .. name .. ":Disconnect()",
+                indent .. "        elseif typeof(" .. name .. ') == "Instance" then',
+                indent .. "            " .. name .. ":Destroy()",
+                indent .. "        elseif type(" .. name .. ') == "table" then',
+                indent .. "            if type(" .. name .. '.Dispose) == "function" then',
+                indent .. "                " .. name .. ":Dispose()",
+                indent .. "            elseif type(" .. name .. '.Disconnect) == "function" then',
+                indent .. "                " .. name .. ":Disconnect()",
+                indent .. "            elseif type(" .. name .. '.Destroy) == "function" then',
+                indent .. "                " .. name .. ":Destroy()",
+                indent .. "            else",
+                indent .. '                error("using resource has no Dispose, Disconnect, or Destroy method")',
+                indent .. "            end",
+                indent .. "        else",
+                indent .. '            error("using cannot clean up this resource type")',
+                indent .. "        end",
+                indent .. "    end",
+                indent .. "end",
+            }
+            table.insert(output, table.concat(code, "\n"))
+        else
+            table.insert(output, raw)
+        end
+    end
+    return table.concat(output, "\n")
+end
+
+local function transpileAsyncFunctions(source: string): (string, number)
+    local starts = {}
+    for _, row in splitLines(source) do
+        local masked = trim(maskNonCode(row.Text))
+        if masked:match("^async%s+function%s+") or masked:match("^local%s+async%s+function%s+") then
+            local at = row.Start + (row.Text:find("async", 1, true) or 1) - 1
+            table.insert(starts, at)
+        end
+    end
+
+    for index = #starts, 1, -1 do
+        local at = starts[index]
+        local closing = findBlock(source, at)
+        local headerEnd = source:find("\n", at, true)
+        if not headerEnd then error("async function needs a body") end
+        local lineStart = (source:sub(1, at - 1):match(".*()\n") or 0) + 1
+        local header = source:sub(lineStart, headerEnd - 1)
+        local modified, replaced = header:gsub("%f[%w]async%s+function%s+", "function ", 1)
+        if replaced ~= 1 then error("Malformed async function declaration") end
+        local body = source:sub(headerEnd + 1, closing.Start - 1)
+        local newBody = table.concat({
+            "    return __lauaAsync.run(function()",
+            normalized(body, "        "),
+            "    end)",
+        }, "\n")
+        source = source:sub(1, lineStart - 1) .. modified .. "\n" .. newBody .. "\n" .. source:sub(closing.Start)
+    end
+    return source, #starts
+end
+
+local function findCloseParen(masked: string, at: number): number?
+    local depth = 0
+    for i = at, #masked do
+        local char = masked:sub(i, i)
+        if char == "(" then depth += 1 end
+        if char == ")" then
+            depth -= 1
+            if depth == 0 then return i end
+        end
+    end
+    return nil
+end
+
+local function transpileAwaits(source: string): (string, number)
+    local occurrences = {}
+    local masked = maskNonCode(source)
+    local from = 1
+    while true do
+        local pos = masked:find("await", from, true)
+        if not pos then break end
+        local before = masked:sub(pos - 1, pos - 1)
+        local after = masked:sub(pos + 5, pos + 5)
+        if not before:match("[%w_%.:]") and not after:match("[%w_]") then
+            table.insert(occurrences, pos)
+        end
+        from = pos + 5
+    end
+    for index = #occurrences, 1, -1 do
+        local start = occurrences[index]
+        masked = maskNonCode(source)
+        local cursor = start + 5
+        while masked:sub(cursor, cursor):match("%s") do cursor += 1 end
+        local operandStart = cursor
+        local last = cursor - 1
+        if masked:sub(cursor, cursor) == "(" then
+            last = findCloseParen(masked, cursor) or error("Unclosed await expression")
+        else
+            local identifier = masked:sub(cursor):match("^([%a_][%w_]*)")
+            if not identifier then error("await needs an expression") end
+            cursor += #identifier
+            last = cursor - 1
+            while cursor <= #masked do
+                local gap = masked:sub(cursor):match("^[ \t]*") or ""
+                local afterGap = cursor + #gap
+                local separator = masked:sub(afterGap, afterGap)
+                if separator == "." or separator == ":" then
+                    local name = masked:sub(afterGap + 1):match("^[ \t]*([%a_][%w_]*)")
+                    if not name then break end
+                    local nameStart = masked:find(name, afterGap + 1, true) or (afterGap + 1)
+                    cursor = nameStart + #name
+                    last = cursor - 1
+                elseif separator == "(" then
+                    local closing = findCloseParen(masked, afterGap)
+                    if not closing then error("Unclosed call after await") end
+                    cursor = closing + 1
+                    last = closing
+                else
+                    break
+                end
+            end
+        end
+        local operand = source:sub(operandStart, last)
+        source = source:sub(1, start - 1) .. "__lauaAsync.await(" .. operand .. ")" .. source:sub(last + 1)
+    end
+    return source, #occurrences
+end
+
+local function insertRuntimeRequire(source: string, expression: string): string
+    local lines = splitLines(source)
+    local index = 1
+    while index <= #lines do
+        local line = trim(lines[index].Text)
+        if line:match("^%-%-!") or line == "" then index += 1 else break end
+    end
+    local first = index <= #lines and lines[index].Start or (#source + 1)
+    return source:sub(1, first - 1) .. "local __lauaAsync = " .. expression .. "\n" .. source:sub(first)
+end
+
+function Transpiler.Transpile(source: string, runtimeRequire: string?): string
+    assert(type(source) == "string", "Expected Laua source string")
+    local output = transpileDefers(transpileSource(transpileUsing(source)))
+    local asyncCount
+    output, asyncCount = transpileAsyncFunctions(output)
+    local awaitCount
+    output, awaitCount = transpileAwaits(output)
+    if awaitCount > 0 and asyncCount == 0 then error("await requires an async function") end
+    if asyncCount > 0 or awaitCount > 0 then
+        output = insertRuntimeRequire(output, runtimeRequire or 'require(script.Parent.LauaAsync)')
+    end
+    return (output:gsub("[ \t]+\n", "\n"))
 end
 
 return Transpiler
