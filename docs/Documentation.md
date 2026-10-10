@@ -1,8 +1,8 @@
 # Laua — Custom Syntax Reference
 
-**Version covered:** Laua v19 (Luau ModuleScript transpiler)
+**Version covered:** Laua v20 (Luau ModuleScript transpiler and matching playground)
 
-Laua is a source-to-source extension of Luau. It introduces the **20 keywords below** and converts them into ordinary Luau. This document covers **only features added by Laua**—not syntax already built into Luau.
+Laua is a source-to-source extension of Luau. It introduces the **27 custom keywords below** and converts them into ordinary Luau. This document covers **only features added by Laua**—not syntax already built into Luau.
 
 > **Scope:** This reference describes the current transpiler and its intended use. Laua is still being developed; some features have limitations listed near the end. Generated code and runtime behavior should be tested in Roblox Studio before being used in production.
 
@@ -14,10 +14,15 @@ Laua is a source-to-source extension of Luau. It introduces the **20 keywords be
 | Access and class modifiers | `public`, `private`, `protected`, `static`, `abstract`, `override`, `final` |
 | Computed properties | `get`, `set` |
 | Named structures | `namespace`, `enum` |
+| Value matching | `match`, `case`, `default` |
+| Module paths | `import`, `from` |
+| Class operators and signals | `operator`, `signal` |
 | Cleanup | `defer`, `using` |
 | Asynchronous operations | `async`, `await` |
 
-**Total: 20 Laua keywords.**
+**Total: 27 Laua keywords.** Laua also adds **three non-keyword syntax features**: optional property access (`?.`), nil coalescing (`??`), and named-table destructuring (`local { ... } = ...`).
+
+> The keywords and operators in this reference are Laua additions, **not native Luau syntax**. Run them through the Laua transpiler before use in a Luau script. This reference intentionally excludes Luau's existing features, including `--!` directives and `@` attributes.
 
 ---
 
@@ -501,60 +506,285 @@ The transpiler returns **source text**. Compiling/executing that text is a separ
 
 ---
 
-## Putting Laua-only features together
+## 21–23. `match`, `case`, `default` — Value matching
+
+A `match` evaluates its subject expression once and compares it to each `case` using normal equality (`==`). Only the first matching branch executes. `default` is optional and, if used, must be the final branch.
 
 ```luau
-class Entity
-    private Health = 100
-
-    constructor(health)
-        self.Health = health
-    end
-
-    get IsAlive()
-        return self.Health > 0
-    end
-
-    final function Reset()
-        self.Health = 100
-    end
-end
-
-class Zombie extends Entity
-    constructor(health)
-        super(health)
-    end
-end
-
-async function ObserveZombie()
-    local zombie = new Zombie(150)
-
-    using connection = game:GetService("RunService").Heartbeat:Connect(function()
-        if zombie.IsAlive then
-            print("Zombie is alive")
-        end
-    end)
-
-    local result = await FetchStatus()
-    return result
+match zombie.State
+    case "Idle"
+        Idle()
+    case "Chasing"
+        Chase()
+    default
+        Stop()
 end
 ```
 
-`FetchStatus()` here represents another asynchronous function defined by your project.
+Roughly becomes an `if`/`elseif`/`else` chain inside a `do` block with one temporary variable holding the evaluated subject.
+
+**Current rules:**
+
+- At least one `case` is required.
+- `case` requires a value to compare against the subject.
+- `default` must appear after a `case`, at most once, with no later `case`.
+- Branch bodies can contain other statements and nested blocks.
+- This is **value matching only**. No guards, wildcards, array patterns, or structural/table matching are implemented.
+
+## 24–25. `import`, `from` — Relative ModuleScript imports
+
+The import form is:
+
+```luau
+import Zombie from "./Modules/Zombie"
+import Config from "../Config"
+```
+
+It lowers to a local variable assigned from a `require(...)` call. A path beginning with `./` searches beneath **the compiled script's parent**; `../` walks to a parent of that parent. Each remaining path segment is found with `:WaitForChild()`.
+
+For example:
+
+```luau
+import Zombie from "./Modules/Zombie"
+```
+
+becomes approximately:
+
+```luau
+local Zombie = require(script.Parent:WaitForChild("Modules"):WaitForChild("Zombie"))
+```
+
+**Current rules and limits:**
+
+- Use `import Name from "./Path/Module"` or single quotes.
+- Paths must begin with `./` or `../`; absolute paths are not supported.
+- Names and path segments must be plain Luau identifiers. No `.luau` filename extension, named import lists, package registry, or wildcard imports.
+- Paths refer to **Roblox instances relative to the executing compiled script**, not files on the computer or the transpiler's ModuleScript.
+- `from` is only part of this import declaration; it does not replace existing Luau syntax elsewhere.
+
+## 26. `operator` — Class operator overloads
+
+Declare supported operators inside a Laua class. The transpiler generates the corresponding Luau metamethod on the class table.
+
+```luau
+class Vector
+    constructor(x, y)
+        self.X = x
+        self.Y = y
+    end
+
+    operator +(other)
+        return new Vector(self.X + other.X, self.Y + other.Y)
+    end
+
+    operator -()
+        return new Vector(-self.X, -self.Y)
+    end
+end
+```
+
+The example's `+` generates a `__add` metamethod, and zero-parameter `-` generates `__unm`.
+
+| Laua operator | Generated metamethod |
+| --- | --- |
+| `+`, `-`, `*`, `/` | `__add`, `__sub`, `__mul`, `__div` |
+| `//`, `%`, `^` | `__idiv`, `__mod`, `__pow` |
+| `..` | `__concat` |
+| `==`, `<`, `<=` | `__eq`, `__lt`, `__le` |
+| `#` | `__len` |
+| `-()` (no parameter) | `__unm` |
+
+**Current rules:** Binary operators take one parameter (`other` above); unary `-` and `#` take none. Unknown operators and modifiers on operators are rejected. Inherited metamethod behavior and Roblox/Luau metamethod restrictions still apply; subclasses may need to redeclare operators. This does **not** introduce new native operators.
+
+## 27. `signal` — Per-instance class events
+
+A `signal` declaration creates a separate `LauaSignal` object for every instance of the class.
+
+```luau
+class Zombie
+    signal Died
+
+    function Kill()
+        self.Died:Fire()
+    end
+end
+
+local zombie = new Zombie
+local connection = zombie.Died:Connect(function()
+    print("Zombie died")
+end)
+zombie:Kill()
+connection:Disconnect()
+zombie.Died:Destroy()
+```
+
+**Runtime behavior:** `LauaSignal.new()` wraps a Roblox `BindableEvent` and exposes `:Connect(callback)`, `:Once(callback)`, `:Wait()`, `:Fire(...)`, and `:Destroy()`. `Connect` and `Once` return Roblox connections. `Destroy` is idempotent; use it when the owning object no longer needs the event.
+
+Signals are per **instance**, not shared static class fields. `signal` currently accepts one identifier per declaration and cannot have class-member modifiers. A `signal` field should not have the same name as another class member. The generated script needs access to `LauaSignal`.
+
+---
+
+## Additional Laua-only operators and expressions
+
+### Optional chaining — `?.`
+
+Optional chaining safely accesses a **property** of a possibly nil value:
+
+```luau
+local health = player?.Character?.Humanoid?.Health
+local player = game:GetService("Players")?.LocalPlayer
+```
+
+A segment evaluates its left-hand side once. If that left-hand side is `nil`, the result is `nil`; otherwise it indexes the property. Each optional link is handled individually.
+
+Rough lowering:
+
+```luau
+local health = __lauaCore.optional(player, "Character")
+```
+
+**Limits:** Only `?.Property` is supported. Optional method calls (`?.Method()` / `?.()`), optional bracket access (`?.[key]`), and automatic safety for later ordinary `.` accesses are not supported. The runtime is needed only for code that uses `?.` or `??`.
+
+### Nil coalescing — `??`
+
+Use a fallback when—and **only when**—the value on the left is `nil`:
+
+```luau
+local health = savedHealth ?? 100
+local enabled = savedEnabled ?? true
+local total = saved ?? (default + bonus)
+```
+
+This preserves `false`, unlike using `or` for a fallback. The right-hand expression runs lazily, only if needed. A chain such as `a ?? b ?? c` is supported.
+
+Rough lowering:
+
+```luau
+local health = __lauaCore.coalesce(savedHealth, function() return 100 end)
+```
+
+**Limit:** Parenthesize compound arithmetic and logical expressions when combining them with `??`, e.g. `value ?? (base + extra)`. Some unparenthesized compound expressions are rejected instead of being rewritten with possibly different precedence.
+
+### Named-table destructuring
+
+Extract named fields into locals:
+
+```luau
+local {Health, WalkSpeed: speed} = zombieData
+```
+
+This becomes approximately:
+
+```luau
+local __lauaDestructure1 = zombieData
+local Health = __lauaDestructure1.Health
+local speed = __lauaDestructure1.WalkSpeed
+```
+
+The right-hand expression is evaluated once. `:` in the braces means **rename the field on extraction**, not a method call.
+
+**Limits:** Only named keys and simple aliases are supported. Nested structures, numeric positions, defaults inside a pattern, and destructuring assignment without `local` are not implemented. If the source evaluates to `nil`, field access can error as in normal Luau.
+
+---
+
+## Runtime dependencies and module naming
+
+Laua's primary compiler is the **Luau ModuleScript** `Transpiler.luau`. It takes Laua source text and returns generated Luau source text. It does **not** automatically execute that output.
+
+The v20 runtime modules are needed only when the source uses their respective features:
+
+| ModuleScript | Used by |
+| --- | --- |
+| `LauaAsync` | `async`, `await` |
+| `LauaCore` | `?.`, `??` |
+| `LauaSignal` | `signal` |
+
+By default, generated source uses paths like `require(script.Parent.LauaCore)`. Those paths are evaluated relative to the **compiled script when it runs**. The runtime modules must be placed accordingly, or the generated require paths must be adjusted before execution.
+
+If your transpiler ModuleScript is named lowercase **`transpiler`**, use that exact spelling:
+
+```luau
+local Transpiler = require(script.Parent.transpiler)
+local compiled = Transpiler.Transpile(source)
+```
+
+`Transpiler.Transpile(source, runtimeRequire)` also accepts an optional custom require expression for `LauaAsync` only. The current implementation does not expose matching custom path arguments for `LauaCore` or `LauaSignal`.
+
+**Studio testing:** The repository provides `Tests.luau` for compilation smoke tests and basic runtime checks. Browser JavaScript tests are not substitutes for executing the generated Luau in Roblox Studio. v20 is not claimed to be fully end-to-end verified there.
+
+---
+
+## Putting Laua-only features together
+
+```luau
+class Counter
+    signal Changed
+    Value = 0
+
+    get IsPositive()
+        return self.Value > 0
+    end
+
+    operator +(other)
+        return self.Value + other.Value
+    end
+
+    function Increment()
+        self.Value += 1
+        self.Changed:Fire(self.Value)
+    end
+end
+
+local counter = new Counter
+local {Value: initial} = {Value = 10}
+local current = counter?.Value ?? initial
+
+match current
+    case 0
+        print("Zero")
+    default
+        print("Nonzero")
+end
+
+local function Observe()
+    using connection = counter.Changed:Connect(function(value)
+        print("Changed", value)
+    end)
+
+    counter:Increment()
+end
+
+Observe()
+```
+
+This illustrates the new syntax without needing an external ModuleScript import. The generated code still requires `LauaCore` and `LauaSignal` at runtime.
 
 ## Current limitations and cautions
 
-1. **This is a source-to-source transpiler, not a full Luau parser.** Complex nested constructs and unusual multiline declarations can require more work.
-2. **`private` / `protected` access is not enforced.** They are not security controls.
-3. **`defer` and `using` are function-scoped**, not scoped to individual inner blocks.
-4. **`await` placement validation is incomplete.** Keep awaits inside async functions; not every misuse is detected before runtime.
-5. **`get` / `set` use metatables.** Use separate backing fields and avoid conflicting property names.
-6. **`final` and `abstract` restrictions are primarily enforced by generated runtime code**, not by a complete static type checker.
-7. **Async requires `LauaAsync`.** Generated code must be able to require the runtime ModuleScript.
-8. **Roblox Studio verification is still needed.** The current package includes smoke tests, but this reference does not claim a full end-to-end production verification.
+1. **The transpiler is not a full Luau parser.** It uses a line-oriented/block-aware transformer for many features. Test nontrivial nested code, especially anonymous functions and multiline expressions.
+2. **`private` and `protected` are not runtime-enforced.** They should never be used as a security boundary.
+3. **`defer` and `using` are function-scoped**, not scoped to individual `if`/loop blocks. Cleanup executes at function exit in last-in, first-out order, including errors.
+4. **`async`/`await` use a Promise-like runtime, not parallel CPU execution.** Await placement checks are limited; await inside an async function.
+5. **`get`/`set` use metatables.** Use separate backing fields and avoid name collisions; static accessors are unsupported.
+6. **`abstract`, `override`, and `final` checks are not a complete static type system.** Some restrictions are enforced by generated code at class setup or use.
+7. **`match` supports equality comparisons, not full structural patterns.** Each match needs at least one case; default, if present, must be last.
+8. **Destructuring supports only named fields and renaming.** Nested and positional patterns are not supported.
+9. **`import` paths resolve against the compiled script's parent at runtime.** Only relative ModuleScript paths with identifier segments are supported.
+10. **Operators become Luau metamethods.** Their actual behavior follows Luau metamethod rules; inherited metamethods may require redeclaration.
+11. **Signals wrap `BindableEvent`.** Clean up connections and destroy signals when appropriate.
+12. **`?.` only protects the explicitly optional property links.** Optional calls or optional bracket indexing are unsupported.
+13. **`??` evaluates its fallback lazily and preserves `false`.** Parenthesize mixed/compound expressions.
+14. **Runtime requires must resolve where generated code executes.** `LauaAsync`, `LauaCore`, and `LauaSignal` are separate ModuleScripts.
+15. **Complete Roblox Studio execution has not been verified here.** Existing tests verify generated-source fragments and basic runtime operations, but do not prove every feature works in a full game.
 
 ---
 
 ## Complete list of Laua additions
 
-`class` · `extends` · `constructor` · `new` · `super` · `public` · `private` · `protected` · `static` · `abstract` · `override` · `final` · `get` · `set` · `namespace` · `enum` · `defer` · `using` · `async` · `await`
+**27 custom keywords:**
+
+`class` · `extends` · `constructor` · `new` · `super` · `public` · `private` · `protected` · `static` · `abstract` · `override` · `final` · `get` · `set` · `namespace` · `enum` · `defer` · `using` · `async` · `await` · `match` · `case` · `default` · `import` · `from` · `operator` · `signal`
+
+**Additional Laua-only syntax:** `?.` · `??` · `local {Field, Field: alias} = tableExpression`
+
+*End of Laua-only syntax reference (v20).*
