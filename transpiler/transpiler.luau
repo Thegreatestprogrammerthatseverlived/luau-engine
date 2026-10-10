@@ -1,4 +1,4 @@
-local Transpiler = {}
+local Transpiler = {Version = "3.9"}
 
 -- Embedded runtime sources. Generated scripts are self-contained and never require LauaAsync/LauaCore/LauaSignal.
 
@@ -49,7 +49,12 @@ function Async.run(callback, ...)
 end
 
 function Async.await(value)
-    if not isPromise(value) then return value end
+    if not isPromise(value) then
+        if type(value) == "table" and type(value.Wait) == "function" and type(value.Fire) == "function" then
+            return value:Wait()
+        end
+        return value
+    end
     if value._status == "Fulfilled" then
         return table.unpack(value._values, 1, value._values.n)
     end
@@ -112,7 +117,7 @@ function LauaCore.coalesce(value: any, fallback: () -> any): any
 end
 
 
--- Laua v22: spread merges consecutive array entries and then named keys.
+-- Laua: spread merges consecutive array entries and then named keys.
 function LauaCore.spread(...: any): {[any]: any}
     local result = {}
     for index = 1, select("#", ...) do
@@ -149,6 +154,56 @@ function LauaCore.slice(value: any, first: number?, last: number?): any
         return result
     end
     error("slice supports strings and buffers only")
+end
+
+
+-- Laua is: matches a Laua class or one of its ancestors.
+function LauaCore.is(value: any, class: any): boolean
+    if type(class) ~= "table" or type(value) ~= "table" then return false end
+    local candidate = getmetatable(value)
+    local visited = {}
+    while type(candidate) == "table" and not visited[candidate] do
+        if candidate == class then return true end
+        visited[candidate] = true
+        local meta = getmetatable(candidate)
+        candidate = type(meta) == "table" and meta.__index or nil
+    end
+    return false
+end
+
+-- Unlike an eager index, the index expression is not evaluated for nil.
+function LauaCore.optionalCall(value: any, callback: (any) -> any): any
+    if value == nil then return nil end
+    return callback(value)
+end
+
+function LauaCore.optionalIndex(value: any, key: () -> any): any
+    if value == nil then return nil end
+    return value[key()]
+end
+
+-- Cache complete result tuples, including nils; cache keys use argument identity.
+function LauaCore.memo(callback: (...any) -> ...any): (...any) -> ...any
+    local root = {}
+    local nilKey = {}
+    local terminal = {}
+    return function(...)
+        local args = table.pack(...)
+        local node = root
+        for index = 1, args.n do
+            local key = args[index]
+            if key == nil then key = nilKey end
+            local nextNode = node[key]
+            if not nextNode then nextNode = {}; node[key] = nextNode end
+            node = nextNode
+        end
+        local cached = node[terminal]
+        if not cached then
+            cached = table.pack(callback(table.unpack(args, 1, args.n)))
+            node[terminal] = cached
+        end
+        return table.unpack(cached, 1, cached.n)
+    end
 end
 
 LauaCore.table = {}
@@ -208,8 +263,8 @@ local LAUA_SIGNAL_RUNTIME_SOURCE = [====[
 local Signal = {}
 Signal.__index = Signal
 
-function Signal.new()
-    return setmetatable({ _event = Instance.new("BindableEvent"), _destroyed = false }, Signal)
+function Signal.new(typeNames: {string}?)
+    return setmetatable({ _event = Instance.new("BindableEvent"), _destroyed = false, _types = typeNames }, Signal)
 end
 
 function Signal:Connect(callback: (...any) -> ())
@@ -230,6 +285,21 @@ end
 
 function Signal:Fire(...)
     assert(not self._destroyed, "Cannot fire a destroyed signal")
+    local types = self._types
+    if types then
+        assert(select("#", ...) == #types, "Signal argument count mismatch")
+        for index, name in types do
+            local value = select(index, ...)
+            local optional = name:sub(-1) == "?"
+            local typeName = optional and name:sub(1,-2) or name
+            if value == nil and optional then continue end
+            if typeof(value) ~= typeName then
+                if not (typeof(value) == "Instance" and value:IsA(typeName)) then
+                    error("Signal expected " .. typeName .. " at argument " .. index, 2)
+                end
+            end
+        end
+    end
     self._event:Fire(...)
 end
 
@@ -651,12 +721,21 @@ local function transpileClasses(source: string): string
                 index += 1
                 continue
             end
-            local signalName = remainder:match("^signal%s+([%a_][%w_]*)$")
+            local signalName, signalParams = remainder:match("^signal%s+([%a_][%w_]*)%s*%(([^)]*)%)$")
+            if not signalName then signalName = remainder:match("^signal%s+([%a_][%w_]*)$") end
             if signalName then
                 if names[signalName] then error(`Duplicate class member '{signalName}'`) end
                 if next(modifiers) then error("Signals cannot have modifiers") end
                 names[signalName] = true
-                table.insert(signals, signalName)
+                local types = {}
+                if signalParams and trim(signalParams) ~= "" then
+                    for part in signalParams:gmatch("[^,]+") do
+                        local typeName = trim(part):match("^[%a_][%w_]*%s*:%s*([%a_][%w_]*%??)$")
+                        if not typeName then error("Signals require typed named parameters") end
+                        table.insert(types,'"' .. typeName .. '"')
+                    end
+                end
+                table.insert(signals, {Name = signalName, Types = #types > 0 and ("{" .. table.concat(types, ", ") .. "}") or nil})
                 index += 1
                 continue
             end
@@ -809,7 +888,7 @@ local function transpileClasses(source: string): string
                 table.insert(generated, `    self.{field.Name} = {transpileSource(field.Value)}`)
             end
         end
-        for _, signalName in signals do table.insert(generated, `    self.{signalName} = __lauaSignal.new()`) end
+        for _, item in signals do table.insert(generated, `    self.{item.Name} = __lauaSignal.new({item.Types or ""})`) end
         local innerCtor = normalized(transpileSource(ctorBody), "    ")
         if innerCtor ~= "" then table.insert(generated, innerCtor) end
         table.insert(generated, "end")
@@ -1209,9 +1288,44 @@ local function transpileOptional(source: string): (string, boolean)
         if not pos then return source, changed end
         local left = expressionLeft(masked, pos - 1)
         local member = masked:sub(pos + 2):match("^([%a_][%w_]*)")
-        if not left or not member then error("Optional chaining supports value?.property") end
-        local nextChar = (source:sub(pos + 2 + #member):match("^%s*(.)") or "")
-        if nextChar == "(" or nextChar == "[" then error("Optional calls/indexing are not supported: use ?.property only") end
+        if not left then error("Optional chaining requires a receiver") end
+        if masked:sub(pos+2,pos+2) == "[" then
+            local depth, closing = 1, nil
+            for i = pos+3, #masked do
+                local char = masked:sub(i,i)
+                if char == "[" then depth += 1 elseif char == "]" then depth -= 1 end
+                if depth == 0 then closing = i; break end
+            end
+            if not closing then error("Unclosed optional index") end
+            local key = trim(source:sub(pos+3,closing-1))
+            if key == "" then error("Optional index requires a key") end
+            local receiver = trim(source:sub(left,pos-1))
+            source = replaceRange(source,left,closing,'__lauaCore.optionalIndex(' .. receiver .. ', function() return ' .. key .. ' end)')
+            changed = true
+            continue
+        end
+        local colon = masked:sub(pos+2,pos+2) == ":"
+        if colon then member = masked:sub(pos+3):match("^([%a_][%w_]*)") end
+        if not member then error("Optional chaining expects a property, index, or method") end
+        local memberEnd = pos + 1 + #member + (colon and 1 or 0)
+        local gap = masked:sub(memberEnd + 1):match("^[ \t]*") or ""
+        local openAt = memberEnd + 1 + #gap
+        if masked:sub(openAt,openAt) == "(" then
+            local depth, closing = 1, nil
+            for i = openAt+1, #masked do
+                local char = masked:sub(i,i)
+                if char == "(" then depth += 1 elseif char == ")" then depth -= 1 end
+                if depth == 0 then closing = i; break end
+            end
+            if not closing then error("Unclosed optional method call") end
+            local receiver = trim(source:sub(left,pos-1))
+            local args = source:sub(openAt+1,closing-1)
+            local invocation = colon and ("__lauaReceiver:" .. member) or ("__lauaReceiver." .. member)
+            source = replaceRange(source,left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) return " .. invocation .. "(" .. args .. ") end)")
+            changed = true
+            continue
+        end
+        if colon then error("Optional colon access requires a method call") end
         local base = trim(source:sub(left, pos - 1))
         local replacement = `__lauaCore.optional({base}, "{member}")`
         source = replaceRange(source, left, pos + 1 + #member, replacement)
@@ -1288,9 +1402,164 @@ local function transpileCoalescing(source: string): (string, boolean)
     end
 end
 
--- Laua v22: source-level sugar. Only fully supported forms are lowered.
+
+-- Transform only non-comment/non-string tokens, so keywords in user data are not rewritten.
+local function transpileIsOperator(source: string): string
+    local position = 1
+    while true do
+        local masked = maskNonCode(source)
+        local first, last = masked:find('%f[%w]is%f[%W]', position)
+        if not first then return source end
+        local before = masked:sub(first - 1, first - 1)
+        local linePrefix = masked:sub((masked:sub(1,first-1):match('.*()\n') or 0) + 1, first-1)
+        if before == '.' or before == ':' or linePrefix:match('function%s+$') then position = last + 1; continue end
+        local left = expressionLeft(masked, first - 1)
+        local rightText = masked:sub(last + 1)
+        local spacing, className = rightText:match('^([ \t]+)([%a_][%w_]*)')
+        if not left or not className then error('is expects: value is ClassName') end
+        local after = last + #spacing + #className
+        local beforeValue = trim(source:sub(left, first - 1))
+        source = replaceRange(source, left, after, '__lauaCore.is(' .. beforeValue .. ', ' .. className .. ')')
+        position = left + 15
+    end
+end
+
+-- Pipeline stages must be named functions. Side effects in the input run once.
+local function transpilePipelines(source: string): string
+    local result = {}
+    for _, line in splitLines(source) do
+        local raw, masked = line.Text, maskNonCode(line.Text)
+        if not masked:find('|>', 1, true) then table.insert(result, raw); continue end
+        local separators = {}
+        local cursor = 1
+        while true do
+            local at = masked:find('|>', cursor, true)
+            if not at then break end
+            table.insert(separators, at)
+            cursor = at + 2
+        end
+        local before = raw:sub(1, separators[1] - 1)
+        local assignment, initial = before:match('^(.-=%s*)(.+)$')
+        if not assignment then
+            assignment = before:match('^(%s*return%s+)')
+            initial = assignment and before:sub(#assignment + 1) or nil
+        end
+        if not assignment then error('Pipeline requires assignment or return: local x = value |> Function') end
+        local value = trim(initial or '')
+        if value == '' then error('Pipeline input is empty') end
+        for index, at in separators do
+            local ending = separators[index + 1] and separators[index + 1] - 1 or #raw
+            local stage = trim(raw:sub(at + 2, ending))
+            if not stage:match('^[%a_][%w_%.]*$') then error('Pipeline stages must be function names') end
+            value = stage .. '(' .. value .. ')'
+        end
+        table.insert(result, assignment .. value)
+    end
+    return table.concat(result, '\n')
+end
+
+-- Memoized functions use the bundled LauaCore runtime.
+local function transpileMemo(source: string): string
+    while true do
+        local masked = maskNonCode(source)
+        local first = masked:find('%f[%w]memo%f[%W]')
+        while first and (masked:sub(first-1,first-1) == '.' or masked:sub(first-1,first-1) == ':') do
+            first = masked:find('%f[%w]memo%f[%W]', first+4)
+        end
+        if not first then return source end
+        local lineStart = (source:sub(1, first-1):match('.*()\n') or 0) + 1
+        if trim(source:sub(lineStart, first-1)) ~= '' then error('memo must start a declaration') end
+        local headerEnd = source:find('\n', first, true)
+        if not headerEnd then error('memo requires a function body') end
+        local header = trim(source:sub(first, headerEnd-1))
+        local funcName = header:match('^memo%s+function%s+([%a_][%w_]*)%s*%(')
+        local isLocal = false
+        if not funcName then
+            funcName = header:match('^memo%s+local%s+function%s+([%a_][%w_]*)%s*%(')
+            isLocal = true
+        end
+        if not funcName then error('memo supports named functions only: memo function Name(...)') end
+        local standardHeader = header:gsub('^memo%s+', '', 1)
+        local rewritten = source:sub(1, first-1) .. standardHeader .. source:sub(headerEnd)
+        local finish = findBlock(rewritten, first)
+        local indent = source:sub(lineStart, first-1)
+        local wrapper = '\n' .. indent .. funcName .. ' = __lauaCore.memo(' .. funcName .. ')'
+        source = rewritten:sub(1, finish.Finish) .. wrapper .. rewritten:sub(finish.Finish + 1)
+    end
+end
+
+-- Default parameters: nil triggers the default, false is retained.
+local function transpileParameterDefaults(source: string): string
+    local rows = {}
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        local masked = maskNonCode(raw)
+        local openAt = masked:find('%f[%w]function%f[%W]')
+        if openAt then
+            local parenAt = masked:find('(', openAt, true)
+            local closeAt = parenAt and masked:find(')', parenAt, true)
+            if parenAt and closeAt then
+                local params = raw:sub(parenAt+1,closeAt-1)
+                if params:find('=',1,true) then
+                    local parsed, initializers = {}, {}
+                    for piece in (params .. ','):gmatch('(.-),') do
+                        local left, default = piece:match('^%s*(.-)%s*=%s*(.-)%s*$')
+                        if left then
+                            local var = left:match('^([%a_][%w_]*)')
+                            if not var then error('Invalid default parameter') end
+                            table.insert(parsed, trim(left))
+                            table.insert(initializers, ('if %s == nil then %s = %s end'):format(var,var,default))
+                        else
+                            table.insert(parsed, trim(piece))
+                        end
+                    end
+                    raw = raw:sub(1,parenAt) .. table.concat(parsed, ', ') .. raw:sub(closeAt)
+                    table.insert(rows,raw)
+                    local indent = (raw:match('^[ \t]*') or '') .. '    '
+                    for _, statement in initializers do table.insert(rows,indent .. statement) end
+                    continue
+                end
+            end
+        end
+        table.insert(rows,raw)
+    end
+    return table.concat(rows,'\n')
+end
+
+-- Compile-time branch selection; only these explicit directives have special meaning.
+local function preprocessMode(source: string, mode: string): string
+    local out, stack = {}, {}
+    local active = true
+    for _, row in splitLines(source) do
+        local line = row.Text
+        local flag = line:match('^%s*%-%-#if%s+(%u+)%s*$')
+        if flag then
+            if flag ~= 'DEBUG' and flag ~= 'RELEASE' and flag ~= 'DEVELOPMENT' then error('Unknown --#if mode ' .. flag) end
+            table.insert(stack, {Parent=active, Matched=mode:upper()==flag, Else=false})
+            active = active and mode:upper()==flag
+            table.insert(out,'')
+        elseif line:match('^%s*%-%-#else%s*$') then
+            local top = stack[#stack]
+            if not top or top.Else then error('Unexpected --#else') end
+            top.Else = true
+            active = top.Parent and not top.Matched
+            table.insert(out,'')
+        elseif line:match('^%s*%-%-#end%s*$') then
+            local top = table.remove(stack)
+            if not top then error('Unexpected --#end') end
+            active = top.Parent
+            table.insert(out,'')
+        else
+            table.insert(out,active and line or '')
+        end
+    end
+    if #stack > 0 then error('Missing --#end for compile-time branch') end
+    return table.concat(out,'\n')
+end
+
+-- Laua: source-level sugar. Only fully supported forms are lowered.
 -- Keep unsupported proposals from leaking malformed syntax into generated Luau.
-local function validateV22Experimental(source: string)
+local function validatePendingFeatures(source: string)
     for _, row in splitLines(source) do
         local line = trim(maskNonCode(row.Text))
         local reasons = {
@@ -1305,11 +1574,11 @@ local function validateV22Experimental(source: string)
         for _, entry in reasons do
             -- Plain pattern alternatives are handled explicitly below.
             if entry[2] ~= "Labeled loop exits" and line:match(entry[1]) then
-                error(entry[2] .. " are specified for v22 but not yet implemented in the transpiler")
+                error(entry[2] .. " are specified for Laua but not yet implemented in the transpiler")
             end
         end
         if line:match("^[%a_][%w_]*:%s*for%s") or line:match("^[%a_][%w_]*:%s*while%s") or line:match("^[%a_][%w_]*:%s*repeat%s") then
-            error("Labeled loop exits are specified for v22 but not yet implemented")
+            error("Labeled loop exits are specified for Laua but not yet implemented")
         end
         if line:match("^function%s+[%a_][%w_%.:]*%s*<[^>]*:%s*[%a_][%w_]*[^>]*>") then
             error("Constrained generics need a real type checker and are not yet implemented")
@@ -1652,9 +1921,15 @@ local function insertEmbeddedRuntimes(source: string): string
     return source:sub(1, at - 1) .. table.concat(fragments, "\n\n") .. "\n\n" .. source:sub(at)
 end
 
-function Transpiler.Transpile(source: string, _runtimeRequire: string?): string
+function Transpiler.Transpile(source: string, options: any?): string
     assert(type(source) == "string", "Expected Laua source string")
-    validateV22Experimental(source)
+    local mode = type(options) == "table" and options.Mode or "Development"
+    if mode ~= "Development" and mode ~= "Release" and mode ~= "Debug" then error("Invalid Laua compile mode") end
+    source = preprocessMode(source, mode)
+    validatePendingFeatures(source)
+    source = transpilePipelines(source)
+    source = transpileMemo(source)
+    source = transpileIsOperator(source)
     source = transpileAdditionalSyntax(source)
     local withoutExports, exportedNames = transpileExports(source)
     local output = transpileDefers(transpileExtensions(transpileSource(transpileUsing(transpileCoalescingAssign(withoutExports)))))
@@ -1663,6 +1938,7 @@ function Transpiler.Transpile(source: string, _runtimeRequire: string?): string
     local awaitCount
     output, awaitCount = transpileAwaits(output)
     if awaitCount > 0 and asyncCount == 0 then error("await requires an async function") end
+    output = transpileParameterDefaults(output)
     output = insertEmbeddedRuntimes(output)
     if #exportedNames > 0 then
         local values = {}
