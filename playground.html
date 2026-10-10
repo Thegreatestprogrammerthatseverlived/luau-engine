@@ -42,6 +42,24 @@
     dialog { width:min(950px,94vw); max-height:85vh; background:#161b26; border:1px solid #3a4557; border-radius:12px; color:#e5e7eb; }
     dialog::backdrop { background:rgba(0,0,0,.7); }
     #diffResult { max-height:65vh; overflow:auto; background:#0c1018; padding:14px; font-size:12px; white-space:pre; line-height:1.5; }
+
+    /* v3.10 multi-file project workspace */
+    .actions { flex-wrap: wrap; justify-content: flex-end; }
+    .file-tabs { display:flex; align-items:center; gap:3px; flex:1; min-width:0; overflow-x:auto; scrollbar-width:thin; }
+    .file-tab { white-space:nowrap; display:inline-flex; align-items:center; gap:7px; background:transparent; color:#a6b3c6; border:1px solid transparent; border-bottom:2px solid transparent; border-radius:7px 7px 0 0; padding:7px 9px; font-size:12px; font-weight:500; }
+    .file-tab:hover { background:#232b3b; }
+    .file-tab.active { color:#f8fafc; background:#202739; border-color:#344155; border-bottom-color:#60a5fa; }
+    .file-tab .file-error { color:#fca5a5; font-size:11px; }
+    .file-tab .file-close { border:0; background:none; color:#94a3b8; padding:0 3px; font-size:16px; font-weight:400; line-height:1; }
+    .file-tab .file-close:hover { color:white; background:#38465c; }
+    .file-tab:focus-visible,.file-close:focus-visible { outline:2px solid #60a5fa; outline-offset:-2px; }
+    .tab-add { flex:none; border-radius:6px; padding:5px 10px; font-size:16px; }
+    .tab-action { font-size:11px; padding:5px 8px; flex:none; }
+    .pane-title.has-tabs { height:auto; min-height:42px; text-transform:none; letter-spacing:normal; gap:8px; }
+    .file-tools { display:flex; gap:5px; align-items:center; flex:none; }
+    .filename-label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:220px; }
+    .panel-subtitle { font-size:11px; color:#748297; letter-spacing:0; text-transform:none; }
+    @media (max-width:1100px) { .file-tools .tab-action { padding:5px; } }
     .ok { color: #86efac !important; }
     .error { color: #fca5a5 !important; }
     @media (max-width: 850px) {
@@ -56,7 +74,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.9 · live lint</span>
+      <span>pronounced “Lawah” · v3.10 · multi-file · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn">Example</button>
@@ -73,19 +91,28 @@
       <button id="testsBtn" title="Run compiler regression tests">Tests</button>
       <button id="diffBtn" title="Compare the last two generated outputs">Output Diff</button>
       <button id="docsBtn" title="Generate reference documentation from Laua declarations">Docs</button>
-      <button id="exportBtn" title="Export generated Luau">Export Luau</button>
+      <button id="exportBtn" title="Export active file as Luau">Export Luau</button>
+      <button id="exportProjectBtn" title="Export all Laua sources and generated Luau in a ZIP">Export Project ZIP</button>
       <button id="copyBtn" title="Copy generated Luau code">Copy Luau</button>
     </div>
   </header>
 
   <main>
     <section class="pane">
-      <div class="pane-title"><span>Laua</span><span>Ctrl + Enter to transpile</span></div>
+      <div class="pane-title has-tabs">
+        <div id="fileTabs" class="file-tabs" role="tablist" aria-label="Laua project files"></div>
+        <div class="file-tools">
+          <button id="newFileBtn" class="tab-add" title="New .laua file" aria-label="New .laua file">+</button>
+          <button id="renameFileBtn" class="tab-action" title="Rename selected file">Rename</button>
+          <button id="openFilesBtn" class="tab-action" title="Open .laua files from your computer">Open</button>
+          <input id="openFilesInput" type="file" accept=".laua,text/plain" multiple hidden />
+        </div>
+      </div>
       <div id="lauaEditor" class="editor"></div>
     </section>
 
     <section class="pane">
-      <div class="pane-title"><span>Luau Output</span><span>read only</span></div>
+      <div class="pane-title"><span>Luau Output</span><span id="outputFilename" class="filename-label">main.luau · read only</span></div>
       <div id="luauEditor" class="editor"></div>
     </section>
   </main>
@@ -4933,7 +4960,7 @@ local part = message[1:7]`;
             snippet("enum auto values", "enum ${1:Name}\n\t${2:First}\n\t${3:Second}\n\t${4:Third}\nend", "Laua enum", "Create a Laua enum with automatic numeric values.")
           );
 
-          const sourceSymbols = getLauaSymbols(model.getValue());
+          const sourceSymbols = getProjectSymbols(model);
           const deprecatedFunctions = indexPlaygroundDeprecatedFunctions(model.getValue(), maskNonCode(model.getValue()));
 
           for (const [localName, localInfo] of Object.entries(sourceSymbols.locals)) {
@@ -5180,7 +5207,7 @@ local part = message[1:7]`;
         async provideInlineCompletions(model, position) {
           const line = model.getLineContent(position.lineNumber);
           const before = line.slice(0, position.column - 1);
-          const symbols = getLauaSymbols(model.getValue());
+          const symbols = getProjectSymbols(model);
           const cursorOffset = model.getOffsetAt(position);
 
           const makeItem = (startColumn, text) => ({
@@ -5483,8 +5510,389 @@ local part = message[1:7]`;
         }
       });
 
+
+      // One Monaco model per project file: the editor, lint, cursor and undo
+      // history are independent even though the transpiler remains single-file.
+      const projectFiles = new Map();
+      const PROJECT_KEY = "laua-playground-project-v3.10";
+      let activeFile = null;
+      let projectReady = false;
+      const projectTabBar = document.getElementById("fileTabs");
+      const projectStatus = () => document.getElementById("status");
+      const modeSelection = () => document.getElementById("modeSelect").value;
+
+      function normalizeProjectFilename(input) {
+        let name = String(input || "").trim().replace(/\\/g, "/");
+        name = name.replace(/^\/+/, "");
+        if (!name.endsWith(".laua")) name += ".laua";
+        const pieces = name.split("/");
+        if (pieces.some(part => part === ".." || part === "." || !/^[A-Za-z_][A-Za-z0-9_]*\.laua$/.test(part) && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(part))) {
+          throw new Error("Use .laua names like main.laua or Modules/Zombie.laua (letters, digits and underscores only).");
+        }
+        return name;
+      }
+
+      function removeLauaExtension(path) { return path.replace(/\.laua$/, ""); }
+
+      function resolveProjectImport(fromFile, importPath) {
+        if (!/^(?:\.\/|\.\.\/)/.test(importPath)) return null;
+        const base = fromFile.split("/").slice(0, -1);
+        for (const part of importPath.replace(/\\/g, "/").split("/")) {
+          if (!part || part === ".") continue;
+          if (part === "..") {
+            if (!base.length) return null;
+            base.pop();
+          } else {
+            if (!/^[A-Za-z_][A-Za-z0-9_]*(?:\.laua)?$/.test(part)) return null;
+            base.push(part);
+          }
+        }
+        const target = base.join("/");
+        return target.endsWith(".laua") ? target : target + ".laua";
+      }
+
+      function scanProjectImports(fileName, source) {
+        const imports = [];
+        const sourceLines = source.split("\n");
+        for (let row = 0; row < sourceLines.length; row++) {
+          const code = sourceLines[row];
+          const trimmed = maskNonCode(code).trim();
+          if (!/^import\b/.test(trimmed)) continue;
+          const match = code.match(/^\s*import\s+(?:([A-Za-z_]\w*)|\{([^{}]+)\})\s+from\s+["']([^"'\n]+)["']\s*$/);
+          if (!match) continue; // ordinary parser/linter handles malformed imports
+          imports.push({name:match[1],named:match[2],path:match[3],target:resolveProjectImport(fileName,match[3]),line:row + 1});
+        }
+        return imports;
+      }
+
+      function scanProjectExports(source) {
+        const exports = {};
+        const pattern = /^\s*export\s+(?:(?:final|abstract)\s+)?(class|namespace|enum|(?:local\s+)?(?:async\s+)?function|local)\s+([A-Za-z_]\w*)/gm;
+        for (const m of source.matchAll(pattern)) {
+          const rawKind = m[1];
+          const kind = rawKind.endsWith("function") ? "function" : rawKind === "local" ? "field" : rawKind;
+          exports[m[2]] = {kind, name:m[2]};
+        }
+        return exports;
+      }
+
+      function getProjectSymbols(model) {
+        const current = findFileByModel(model);
+        const localSymbols = getLauaSymbols(model.getValue());
+        if (!current) return localSymbols;
+        for (const imp of scanProjectImports(current.name, model.getValue())) {
+          const imported = imp.target && projectFiles.get(imp.target);
+          if (!imported) continue;
+          const exports = scanProjectExports(imported.model.getValue());
+          let remoteSymbols = null;
+          try {
+            // The original symbol scanner recognizes `class X` but not
+            // `export class X`. Strip only the export prefix for indexing.
+            const indexedSource = imported.model.getValue().replace(/^(\s*)export\s+(?=(?:abstract\s+|final\s+)?(?:class|enum|namespace|(?:local\s+)?(?:async\s+)?function|local)\b)/gm, "$1");
+            remoteSymbols = getLauaSymbols(indexedSource);
+          } catch { continue; }
+          if (imp.name) {
+            localSymbols.namespaces[imp.name] = {
+              name:imp.name, start:0, end:0,
+              members:Object.fromEntries(Object.entries(exports).map(([key,value]) => [key, {kind:value.kind === "function" ? "function" : "field", detail:`Export from ${imp.target}`}]))
+            };
+          }
+          if (imp.named) {
+            for (const clause of imp.named.split(",")) {
+              const named = clause.trim().match(/^([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?$/);
+              if (!named || !exports[named[1]]) continue;
+              const original = named[1], alias = named[2] || named[1];
+              const info = exports[original];
+              if (info.kind === "class" && remoteSymbols.classes[original]) {
+                if (!localSymbols.classes[alias]) localSymbols.classes[alias] = {...remoteSymbols.classes[original], name:alias, start:-1, end:-1};
+              } else if (info.kind === "namespace" && remoteSymbols.namespaces[original]) {
+                if (!localSymbols.namespaces[alias]) localSymbols.namespaces[alias] = {...remoteSymbols.namespaces[original], name:alias, start:-1, end:-1};
+              } else if (info.kind === "enum" && remoteSymbols.enums[original]) {
+                if (!localSymbols.enums[alias]) localSymbols.enums[alias] = {...remoteSymbols.enums[original], name:alias, start:-1, end:-1};
+              } else if (info.kind === "function") {
+                localSymbols.localFunctions[alias] = remoteSymbols.localFunctions[original] || {name:alias,params:"",detail:`Import from ${imp.target}`};
+              } else {
+                localSymbols.locals[alias] = {name:alias,detail:`Import from ${imp.target}`};
+              }
+            }
+          }
+        }
+        return localSymbols;
+      }
+
+      function findFileByModel(model) {
+        if (!model) return null;
+        for (const file of projectFiles.values()) if (file.model === model) return file;
+        return null;
+      }
+
+      function projectImportMarkers(file) {
+        const markers = [];
+        for (const imp of scanProjectImports(file.name,file.model.getValue())) {
+          const targetFile = imp.target && projectFiles.get(imp.target);
+          let message = null;
+          if (!imp.target) message = `Invalid project import '${imp.path}'.`;
+          else if (!targetFile) message = `Missing project file '${imp.target}' (imported as ${imp.path}).`;
+          else if (imp.named) {
+            const exports = scanProjectExports(targetFile.model.getValue());
+            for (const part of imp.named.split(",")) {
+              const name = part.trim().match(/^([A-Za-z_]\w*)/);
+              if (name && !exports[name[1]]) {
+                message = `'${name[1]}' is not exported from ${imp.target}.`;
+                break;
+              }
+            }
+          }
+          if (message) markers.push({severity:monaco.MarkerSeverity.Error, startLineNumber:imp.line, endLineNumber:imp.line, startColumn:1, endColumn:Math.max(2,file.model.getLineMaxColumn(imp.line)), message, source:"Laua project"});
+        }
+        return markers;
+      }
+
+      function refreshFileMarkers(file) {
+        const result = updateLauaDiagnostics(file.model);
+        const base = monaco.editor.getModelMarkers({owner:"laua",resource:file.model.uri}) || [];
+        const projectErrors = projectImportMarkers(file);
+        monaco.editor.setModelMarkers(file.model,"laua-project",projectErrors);
+        file.errors = (result?.errors || 0) + projectErrors.length;
+        file.warnings = result?.warnings || 0;
+        return {errors:file.errors, warnings:file.warnings, hints:result?.hints || 0, directives:result?.directives};
+      }
+
+      function lintAllProjectFiles() {
+        let errors=0, warnings=0;
+        for (const file of projectFiles.values()) {
+          const res=refreshFileMarkers(file);
+          errors+=res.errors;
+          warnings+=res.warnings;
+        }
+        renderProjectTabs();
+        return {errors,warnings};
+      }
+
+      function rememberProject() {
+        if (!projectReady) return;
+        try {
+          const value = {active:activeFile,files:[...projectFiles.values()].map(f=>({name:f.name,source:f.model.getValue()}))};
+          localStorage.setItem(PROJECT_KEY,JSON.stringify(value));
+        } catch (error) {
+          // Storage can be disabled in private or file:// contexts. Editing still works.
+          console.warn("Laua project autosave unavailable:",error);
+        }
+      }
+
+      function restoredProject() {
+        try {
+          const saved=JSON.parse(localStorage.getItem(PROJECT_KEY) || "null");
+          if (!saved || !Array.isArray(saved.files) || !saved.files.length || saved.files.length > 100) return null;
+          const seen=new Set(), safe=[];
+          for (const entry of saved.files) {
+            const name=normalizeProjectFilename(entry.name);
+            if (seen.has(name) || typeof entry.source!=="string") return null;
+            seen.add(name);safe.push({name,source:entry.source});
+          }
+          return {files:safe,active:seen.has(saved.active)?saved.active:safe[0].name};
+        } catch { return null; }
+      }
+
+      function createProjectFile(name,source="", options={}) {
+        const normalized=normalizeProjectFilename(name);
+        if (projectFiles.has(normalized)) throw new Error(`'${normalized}' already exists.`);
+        const uri=monaco.Uri.parse(`inmemory://laua/${normalized}`);
+        const model=monaco.editor.createModel(source,"laua",uri);
+        const output=monaco.editor.createModel("","lua",monaco.Uri.parse(`inmemory://laua-output/${removeLauaExtension(normalized)}.luau`));
+        const file={name:normalized,model,output,sourceView:null,outputView:null,errors:0,warnings:0,generated:null};
+        file.disposeChange=model.onDidChangeContent(()=>{
+          file.generated=null;
+          file.output.setValue("");
+          if (activeFile === file.name) {
+            lastSuccessfulLuau=null;
+            priorSuccessfulLuau=null;
+          }
+          rememberProject();
+          refreshEditorIntelligence();
+        });
+        projectFiles.set(normalized,file);
+        if (!options.silent) { switchProjectFile(normalized); rememberProject(); }
+        return file;
+      }
+
+      function switchProjectFile(name) {
+        const next=projectFiles.get(name);
+        if (!next) throw new Error(`Missing file '${name}'.`);
+        if (activeFile && projectFiles.has(activeFile)) {
+          const previous=projectFiles.get(activeFile);
+          previous.sourceView=lauaEditor.saveViewState();
+          previous.outputView=luauEditor.saveViewState();
+        }
+        activeFile=name;
+        lauaEditor.setModel(next.model);
+        luauEditor.setModel(next.output);
+        if (next.sourceView) lauaEditor.restoreViewState(next.sourceView);
+        if (next.outputView) luauEditor.restoreViewState(next.outputView);
+        document.getElementById("outputFilename").textContent=removeLauaExtension(name)+".luau · read only";
+        lastSuccessfulLuau=next.generated;
+        priorSuccessfulLuau=null;
+        renderProjectTabs();
+        refreshEditorIntelligence();
+        rememberProject();
+      }
+
+      function renderProjectTabs() {
+        projectTabBar.replaceChildren();
+        for (const file of projectFiles.values()) {
+          const tab=document.createElement("button");
+          tab.type="button";
+          tab.className="file-tab"+(file.name===activeFile?" active":"");
+          tab.setAttribute("role","tab");
+          tab.setAttribute("aria-selected",file.name===activeFile?"true":"false");
+          tab.title=file.name;
+          const label=document.createElement("span");label.textContent=file.name;
+          tab.appendChild(label);
+          if (file.errors) { const indicator=document.createElement("span");indicator.className="file-error";indicator.textContent=`${file.errors}!`;tab.appendChild(indicator); }
+          const close=document.createElement("span");
+          close.className="file-close";close.setAttribute("aria-label",`Close ${file.name}`);close.textContent="×";
+          close.setAttribute("role","button");close.setAttribute("tabindex","0");
+          close.addEventListener("click", event=>{event.stopPropagation();deleteProjectFile(file.name);});
+          close.addEventListener("keydown",event=>{if(event.key==="Enter" || event.key===" "){event.preventDefault();event.stopPropagation();deleteProjectFile(file.name);}});
+          tab.appendChild(close);
+          tab.addEventListener("click",()=>switchProjectFile(file.name));
+          projectTabBar.appendChild(tab);
+        }
+      }
+
+      function deleteProjectFile(name) {
+        if (!projectFiles.has(name)) return;
+        if (projectFiles.size===1) { projectStatus().textContent="You must keep at least one Laua file. Use Clear to empty it.";return; }
+        if (!confirm(`Close and delete '${name}' from this browser project?`)) return;
+        const files=[...projectFiles.keys()],index=files.indexOf(name);
+        const file=projectFiles.get(name);
+        projectFiles.delete(name);
+        file.disposeChange.dispose();
+        if (activeFile===name) {activeFile=null; switchProjectFile(files[index+1] && projectFiles.has(files[index+1])?files[index+1]:files[index-1]);}
+        file.model.dispose();file.output.dispose();
+        rememberProject();lintAllProjectFiles();renderProjectTabs();
+      }
+
+      function projectRelativePath(fromFile,toFile) {
+        const folder=fromFile.split("/").slice(0,-1);
+        const target=removeLauaExtension(toFile).split("/");
+        while(folder.length && target.length && folder[0]===target[0]) {folder.shift();target.shift();}
+        const path=[...folder.map(()=>".."),...target].join("/");
+        return path.startsWith(".") ? path : "./"+path;
+      }
+
+      function updateProjectImportPaths(oldName,newName) {
+        for (const file of projectFiles.values()) {
+          if(file.name===newName) continue;
+          const lines=file.model.getValue().split("\n");
+          let changed=false;
+          for(const imp of scanProjectImports(file.name,file.model.getValue())) {
+            if(imp.target!==oldName) continue;
+            const updated=projectRelativePath(file.name,newName);
+            // Only alter the path of a valid import declaration.
+            const line=lines[imp.line-1];
+            lines[imp.line-1]=line.replace(/(\bfrom\s+)(["'])([^"'\n]+)\2\s*$/,(_full,prefix,quote)=>`${prefix}${quote}${updated}${quote}`);
+            changed=changed || lines[imp.line-1]!==line;
+          }
+          if(changed)file.model.setValue(lines.join("\n"));
+        }
+      }
+
+      function renameProjectFile(previous,desired) {
+        const nextName=normalizeProjectFilename(desired);
+        if (nextName===previous) return;
+        if (projectFiles.has(nextName)) throw new Error(`'${nextName}' already exists.`);
+        const original=projectFiles.get(previous);
+        if (!original) return;
+        // Monaco model URIs cannot be renamed. Create a new file and switch to it.
+        const replacement=createProjectFile(nextName,original.model.getValue(),{silent:true});
+        replacement.output.setValue(original.output.getValue());
+        replacement.generated=original.generated;
+        projectFiles.delete(previous);
+        updateProjectImportPaths(previous,nextName);
+        original.disposeChange.dispose();
+        original.model.dispose();original.output.dispose();
+        if (activeFile===previous) { activeFile=null; switchProjectFile(nextName); }
+        rememberProject();lintAllProjectFiles();renderProjectTabs();
+      }
+
+      function compileProjectFiles() {
+        const result=[];
+        const failures=[];
+        for (const file of projectFiles.values()) {
+          const extra=projectImportMarkers(file);
+          if (extra.length) { failures.push(`${file.name}: ${extra.map(m=>m.message).join("; ")}`);continue; }
+          try {
+            const output=transpile(file.model.getValue(),{Mode:modeSelection()});
+            result.push({sourceName:file.name,source:file.model.getValue(),outputName:removeLauaExtension(file.name)+".luau",output});
+          } catch (error) {failures.push(`${file.name}: ${error?.message || String(error)}`);}
+        }
+        if (failures.length) throw new Error(`Project export stopped: ${failures.join(" | ")}`);
+        return result;
+      }
+
+      // Small ZIP writer: uncompressed ZIP entries, CRC-32, UTF-8 filenames.
+      // Runs entirely in the page: no extra JavaScript dependency or runtime modules.
+      function makeProjectZip(files) {
+        const utf8=new TextEncoder();
+        const crcTable=new Uint32Array(256);
+        for(let i=0;i<256;i++) {
+          let crc=i;
+          for(let j=0;j<8;j++) crc=(crc & 1)?(0xedb88320^(crc>>>1)):(crc>>>1);
+          crcTable[i]=crc>>>0;
+        }
+        function crc32(bytes) {let crc=0xffffffff;for(const byte of bytes)crc=crcTable[(crc^byte)&255]^(crc>>>8);return (crc^0xffffffff)>>>0;}
+        function u16(buffer,offset,v){buffer.setUint16(offset,v,true);}
+        function u32(buffer,offset,v){buffer.setUint32(offset,v>>>0,true);}
+        const blocks=[],central=[];
+        let offset=0;
+        for(const entry of files) {
+          const filename=utf8.encode(entry.name),data=utf8.encode(entry.content);
+          if(filename.length>65535 || data.length>0xffffffff) throw new Error("Project file too large for ZIP export.");
+          const crc=crc32(data),length=30+filename.length+data.length;
+          const local=new Uint8Array(length),view=new DataView(local.buffer);
+          u32(view,0,0x04034b50);u16(view,4,20);u16(view,6,0x0800);u16(view,8,0);
+          u32(view,14,crc);u32(view,18,data.length);u32(view,22,data.length);u16(view,26,filename.length);
+          local.set(filename,30);local.set(data,30+filename.length);blocks.push(local);
+          const record=new Uint8Array(46+filename.length),c=new DataView(record.buffer);
+          u32(c,0,0x02014b50);u16(c,4,20);u16(c,6,20);u16(c,8,0x0800);
+          u32(c,16,crc);u32(c,20,data.length);u32(c,24,data.length);u16(c,28,filename.length);u32(c,42,offset);
+          record.set(filename,46);central.push(record);offset+=length;
+        }
+        if(central.length>65535)throw new Error("Too many files for ZIP export.");
+        const directorySize=central.reduce((a,b)=>a+b.length,0),eocd=new Uint8Array(22),end=new DataView(eocd.buffer);
+        u32(end,0,0x06054b50);u16(end,8,central.length);u16(end,10,central.length);
+        u32(end,12,directorySize);u32(end,16,offset);
+        return new Blob([...blocks,...central,eocd],{type:"application/zip"});
+      }
+
+      function downloadProjectBlob(filename,blob) {
+        const link=document.createElement("a");const url=URL.createObjectURL(blob);
+        link.href=url;link.download=filename;document.body.appendChild(link);link.click();link.remove();
+        setTimeout(()=>URL.revokeObjectURL(url),1000);
+      }
+
+      async function exportProject() {
+        try {
+          const all=compileProjectFiles();
+          const entries=[];
+          for(const item of all) {
+            entries.push({name:"source/"+item.sourceName,content:item.source});
+            entries.push({name:"luau/"+item.outputName,content:item.output});
+          }
+          const zip=makeProjectZip(entries);
+          downloadProjectBlob("Laua-v3.10-project.zip",zip);
+          projectStatus().textContent=`Exported ${all.length} Laua files + ${all.length} Luau outputs.`;
+          projectStatus().className="ok";
+        } catch(error) {
+          projectStatus().textContent=error?.message || String(error);
+          projectStatus().className="error";
+        }
+      }
+
+
       const lauaEditor = monaco.editor.create(document.getElementById("lauaEditor"), {
-        value: STARTER,
+        value: "",
         language: "laua",
         theme: "laua-dark",
         fontSize: 14,
@@ -5638,19 +6046,19 @@ local part = message[1:7]`;
         clearTimeout(diagnosticsTimer.id);
 
         diagnosticsTimer.id = setTimeout(() => {
-          runLint(false);
-        }, 120);
+          lintAllProjectFiles();
+        }, 180);
       }
 
-      lauaEditor.onDidChangeModelContent(refreshEditorIntelligence);
       refreshEditorIntelligence();
 
       function runLint(showStatus = true) {
-        const result = updateLauaDiagnostics(lauaEditor.getModel()) || {
+        const result = refreshFileMarkers(projectFiles.get(activeFile)) || {
           errors: 0,
           warnings: 0,
           hints: 0
         };
+        renderProjectTabs();
 
         if (showStatus) {
           const modeInfo = ` · ${result.directives?.mode || "nonstrict"}${result.directives?.nolint ? " · nolint" : ""}${result.directives?.optimize !== null && result.directives?.optimize !== undefined ? ` · optimize ${result.directives.optimize} (Roblox)` : ""}`;
@@ -5676,12 +6084,16 @@ local part = message[1:7]`;
 
       function runTranspile() {
         try {
+          const file = projectFiles.get(activeFile);
+          const importErrors = projectImportMarkers(file);
+          if (importErrors.length) throw new Error(importErrors.map(item=>item.message).join("; "));
           const output = transpile(lauaEditor.getValue(), {Mode: document.getElementById("modeSelect").value});
           if (lastSuccessfulLuau !== output) {
             priorSuccessfulLuau = lastSuccessfulLuau;
             lastSuccessfulLuau = output;
           }
           luauEditor.setValue(output);
+          file.generated=output;
           const directives = readPlaygroundDirectives(lauaEditor.getValue());
           status.textContent = `Transpiled · ${document.getElementById("modeSelect").value} build · ${directives.mode} · optimize ${directives.optimize ?? "default"} (Roblox handles optimization)`;
           status.className = "ok";
@@ -5689,6 +6101,7 @@ local part = message[1:7]`;
         } catch (err) {
           // Never let Copy use stale code from an earlier successful transpilation.
           luauEditor.setValue("");
+          if (activeFile) projectFiles.get(activeFile).generated=null;
           status.textContent = "Transpile error: " + (err?.message || String(err));
           status.className = "error";
           return null;
@@ -5800,6 +6213,35 @@ local part = message[1:7]`;
         }
       }
 
+
+      document.getElementById("newFileBtn").addEventListener("click",()=>{
+        const name=prompt("New Laua file name (example: Modules/Enemy.laua)","NewFile.laua");
+        if(name===null)return;
+        try{createProjectFile(name,"");lintAllProjectFiles();}catch(error){status.textContent=error.message;status.className="error";}
+      });
+      document.getElementById("renameFileBtn").addEventListener("click",()=>{
+        const name=prompt("Rename the selected Laua file",activeFile);
+        if(name===null)return;
+        try{renameProjectFile(activeFile,name);}catch(error){status.textContent=error.message;status.className="error";}
+      });
+      document.getElementById("openFilesBtn").addEventListener("click",()=>document.getElementById("openFilesInput").click());
+      document.getElementById("openFilesInput").addEventListener("change",async event=>{
+        const files=[...event.target.files];
+        let count=0,errors=[];
+        for(const diskFile of files){
+          try {
+            const name=normalizeProjectFilename(diskFile.webkitRelativePath || diskFile.name);
+            if(projectFiles.has(name))throw new Error(`${name} already exists. Rename it before importing.`);
+            createProjectFile(name,await diskFile.text());count++;
+          }catch(error){errors.push(error.message);}
+        }
+        event.target.value="";
+        lintAllProjectFiles();
+        status.textContent=`Opened ${count} file(s).${errors.length?" "+errors.join(" | "):""}`;
+        status.className=errors.length?"error":"ok";
+      });
+      document.getElementById("exportProjectBtn").addEventListener("click",exportProject);
+
       document.getElementById("lintBtn").addEventListener("click", () => runLint(true));
       document.getElementById("transpileBtn").addEventListener("click", runTranspile);
       copyButton.addEventListener("click", copyTranspiledCode);
@@ -5837,12 +6279,12 @@ local part = message[1:7]`;
         const url = URL.createObjectURL(new Blob([output], {type:"text/plain;charset=utf-8"}));
         const a = document.createElement("a");
         a.href = url;
-        a.download = "output.luau";
+        a.download = removeLauaExtension(activeFile).split("/").at(-1)+".luau";
         document.body.appendChild(a);
         a.click();
         a.remove();
         URL.revokeObjectURL(url);
-        status.textContent = "Exported output.luau";
+        status.textContent = `Exported ${activeFile} as Luau`;
         status.className = "ok";
       });
       document.getElementById("exampleBtn").addEventListener("click", () => {
@@ -5858,6 +6300,18 @@ local part = message[1:7]`;
 
       lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runTranspile);
       lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyL, () => runLint(true));
+
+      // Restore locally saved tabs (browser-local) or create a three-file starter project.
+      const savedProject=restoredProject();
+      const seed=savedProject?.files || [
+        {name:"main.laua",source:'import {Zombie} from "./Zombie"\nimport {Player} from "./Player"\n\nlocal zombie = new Zombie\nlocal player = new Player\nprint(zombie.Health, player.Name)' .replaceAll("\\n", "\n")},
+        {name:"Zombie.laua",source:'export class Zombie\n    Health = 100\nend'.replaceAll("\\n", "\n")},
+        {name:"Player.laua",source:'export class Player\n    Name = "Guest"\nend'.replaceAll("\\n", "\n")}
+      ];
+      for (const entry of seed) createProjectFile(entry.name,entry.source,{silent:true});
+      projectReady=true;
+      switchProjectFile(savedProject?.active || "main.laua");
+
 
       runTranspilerSelfTests();
       runTranspile();
