@@ -74,7 +74,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.13 · multi-file · live lint</span>
+      <span>pronounced “Lawah” · v3.14 · multi-file · optimized output · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn" title="Load the built-in starter example into main.laua (other files stay unchanged)">Default main.laua</button>
@@ -92,7 +92,7 @@
       <button id="diffBtn" title="Compare the last two generated outputs">Output Diff</button>
       <button id="docsBtn" title="Generate reference documentation from Laua declarations">Docs</button>
       <button id="exportBtn" title="Export active file as Luau">Export Luau</button>
-      <button id="exportProjectBtn" title="Export all Laua sources and generated Luau in a ZIP">Export Project ZIP</button>
+      <button id="exportProjectBtn" title="Export every Laua source, compiled Luau outputs, and an error report if needed">Export Project ZIP</button>
       <button id="copyBtn" title="Copy generated Luau code">Copy Luau</button>
     </div>
   </header>
@@ -1510,11 +1510,38 @@ local part = message[1:7]`;
     const LAUA_CORE_RUNTIME_SOURCE = "local LauaCore = {}\n\nfunction LauaCore.optional(value: any, key: any): any\n    if value == nil then return nil end\n    return value[key]\nend\n\nfunction LauaCore.coalesce(value: any, fallback: () -> any): any\n    if value ~= nil then return value end\n    return fallback()\nend\n\n\n-- Laua: spread merges consecutive array entries and then named keys.\nfunction LauaCore.spread(...: any): {[any]: any}\n    local result = {}\n    for index = 1, select(\"#\", ...) do\n        local item = select(index, ...)\n        assert(type(item) == \"table\", \"spread expects tables\")\n        for arrayIndex = 1, #item do\n            table.insert(result, item[arrayIndex])\n        end\n        for key, value in item do\n            if type(key) ~= \"number\" or key % 1 ~= 0 or key < 1 or key > #item then\n                result[key] = value\n            end\n        end\n    end\n    return result\nend\n\nfunction LauaCore.slice(value: any, first: number?, last: number?): any\n    local valueType = typeof(value)\n    if valueType == \"string\" then\n        return string.sub(value, first or 1, last or #value)\n    end\n    if valueType == \"buffer\" then\n        local length = buffer.len(value)\n        local startIndex = first or 1\n        local endIndex = last or length\n        if startIndex < 0 then startIndex = length + startIndex + 1 end\n        if endIndex < 0 then endIndex = length + endIndex + 1 end\n        startIndex = math.clamp(startIndex, 1, length + 1)\n        endIndex = math.clamp(endIndex, 0, length)\n        local size = math.max(0, endIndex - startIndex + 1)\n        local result = buffer.create(size)\n        if size > 0 then buffer.copy(result, 0, value, startIndex - 1, size) end\n        return result\n    end\n    error(\"slice supports strings and buffers only\")\nend\n\n\n-- Laua is: matches a Laua class or one of its ancestors.\nfunction LauaCore.is(value: any, class: any): boolean\n    if type(class) ~= \"table\" or type(value) ~= \"table\" then return false end\n    local candidate = getmetatable(value)\n    local visited = {}\n    while type(candidate) == \"table\" and not visited[candidate] do\n        if candidate == class then return true end\n        visited[candidate] = true\n        local meta = getmetatable(candidate)\n        candidate = type(meta) == \"table\" and meta.__index or nil\n    end\n    return false\nend\n\n-- Unlike an eager index, the index expression is not evaluated for nil.\nfunction LauaCore.optionalCall(value: any, callback: (any) -> any): any\n    if value == nil then return nil end\n    return callback(value)\nend\n\nfunction LauaCore.optionalIndex(value: any, key: () -> any): any\n    if value == nil then return nil end\n    return value[key()]\nend\n\n-- Cache complete result tuples, including nils; cache keys use argument identity.\nfunction LauaCore.memo(callback: (...any) -> ...any): (...any) -> ...any\n    local root = {}\n    local nilKey = {}\n    local terminal = {}\n    return function(...)\n        local args = table.pack(...)\n        local node = root\n        for index = 1, args.n do\n            local key = args[index]\n            if key == nil then key = nilKey end\n            local nextNode = node[key]\n            if not nextNode then nextNode = {}; node[key] = nextNode end\n            node = nextNode\n        end\n        local cached = node[terminal]\n        if not cached then\n            cached = table.pack(callback(table.unpack(args, 1, args.n)))\n            node[terminal] = cached\n        end\n        return table.unpack(cached, 1, cached.n)\n    end\nend\n\nLauaCore.table = {}\n\nfunction LauaCore.table.filter(items: {any}, predicate: (any, number) -> boolean): {any}\n    local out = {}\n    for index, item in items do\n        if predicate(item, index) then table.insert(out, item) end\n    end\n    return out\nend\n\nfunction LauaCore.table.map(items: {any}, callback: (any, number) -> any): {any}\n    local out = {}\n    for index, item in items do\n        out[index] = callback(item, index)\n    end\n    return out\nend\n\nfunction LauaCore.table.reduce(items: {any}, callback: (any, any, number) -> any, initial: any): any\n    local current = initial\n    for index, item in items do current = callback(current, item, index) end\n    return current\nend\n\nfunction LauaCore.table.findWhere(items: {any}, predicate: (any, number) -> boolean): any\n    for index, item in items do\n        if predicate(item, index) then return item end\n    end\n    return nil\nend\n\n-- Lazy imports can break *some* initialisation cycles if neither module\n-- accesses the other before both have finished loading.\nfunction LauaCore.lazyModule(resolve: () -> any): any\n    local loaded = false\n    local target = nil\n    local function get()\n        if not loaded then\n            target = resolve()\n            loaded = true\n        end\n        return target\n    end\n    return setmetatable({}, {\n        __index = function(_, key) return get()[key] end,\n        __newindex = function(_, key, value) get()[key] = value end,\n        __call = function(_, ...) return get()(...) end,\n    })\nend\n\nreturn LauaCore";
     const LAUA_SIGNAL_RUNTIME_SOURCE = "local Signal = {}\nSignal.__index = Signal\n\nfunction Signal.new(typeNames: {string}?)\n    return setmetatable({ _event = Instance.new(\"BindableEvent\"), _destroyed = false, _types = typeNames }, Signal)\nend\n\nfunction Signal:Connect(callback: (...any) -> ())\n    assert(not self._destroyed, \"Cannot connect to a destroyed signal\")\n    assert(type(callback) == \"function\", \"Connect expects a function\")\n    return self._event.Event:Connect(callback)\nend\n\nfunction Signal:Once(callback: (...any) -> ())\n    assert(type(callback) == \"function\", \"Once expects a function\")\n    local connection\n    connection = self:Connect(function(...)\n        if connection then connection:Disconnect() end\n        callback(...)\n    end)\n    return connection\nend\n\nfunction Signal:Fire(...)\n    assert(not self._destroyed, \"Cannot fire a destroyed signal\")\n    local types = self._types\n    if types then\n        assert(select(\"#\", ...) == #types, \"Signal argument count mismatch\")\n        for index, name in types do\n            local value = select(index, ...)\n            local optional = name:sub(-1) == \"?\"\n            local typeName = optional and name:sub(1,-2) or name\n            if value == nil and optional then continue end\n            if typeof(value) ~= typeName then\n                if not (typeof(value) == \"Instance\" and value:IsA(typeName)) then\n                    error(\"Signal expected \" .. typeName .. \" at argument \" .. index, 2)\n                end\n            end\n        end\n    end\n    self._event:Fire(...)\nend\n\nfunction Signal:Wait()\n    assert(not self._destroyed, \"Cannot wait on a destroyed signal\")\n    return self._event.Event:Wait()\nend\n\nfunction Signal:Destroy()\n    if self._destroyed then return end\n    self._destroyed = true\n    self._event:Destroy()\nend\n\nreturn Signal";
 
+    // Generate only the LauaCore helpers used by this file. This avoids
+    // initializing unrelated functions in every compiled script, but keeps
+    // every included helper unchanged (including its runtime behavior).
+    function compactLauaCoreRuntime(source) {
+      const masked = maskNonCode(source);
+      if (/\b__lauaCore\s*\[/.test(masked)) return LAUA_CORE_RUNTIME_SOURCE;
+
+      const requested = new Set([...masked.matchAll(/\b__lauaCore\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)/g)].map(match => match[1]));
+      const declarations = [...LAUA_CORE_RUNTIME_SOURCE.matchAll(/^function LauaCore\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\(/gm)];
+      const available = new Set(declarations.map(match => match[1]));
+      if ([...requested].some(name => !available.has(name))) return LAUA_CORE_RUNTIME_SOURCE;
+
+      const pieces = ["local LauaCore = {}"];
+      if ([...requested].some(name => name.startsWith("table."))) pieces.push("LauaCore.table = {}");
+      for (let i = 0; i < declarations.length; i++) {
+        const declaration = declarations[i];
+        if (!requested.has(declaration[1])) continue;
+        const end = i + 1 < declarations.length ? declarations[i + 1].index : LAUA_CORE_RUNTIME_SOURCE.length;
+        let body = LAUA_CORE_RUNTIME_SOURCE.slice(declaration.index, end);
+        body = body.replace(/^LauaCore\.table\s*=\s*\{\}\s*$/gm, "").replace(/^return LauaCore\s*$/gm, "").trimEnd();
+        pieces.push(body);
+      }
+      pieces.push("return LauaCore");
+      return pieces.join("\n\n");
+    }
+
     function insertLauaEmbeddedRuntimes(source) {
+      const masked = maskNonCode(source);
       const fragments = [];
-      if (source.includes("__lauaAsync.")) fragments.push(`local __lauaAsync = (function()\n${LAUA_ASYNC_RUNTIME_SOURCE}\nend)()`);
-      if (source.includes("__lauaCore.")) fragments.push(`local __lauaCore = (function()\n${LAUA_CORE_RUNTIME_SOURCE}\nend)()`);
-      if (source.includes("__lauaSignal.")) fragments.push(`local __lauaSignal = (function()\n${LAUA_SIGNAL_RUNTIME_SOURCE}\nend)()`);
+      if (/\b__lauaAsync\./.test(masked)) fragments.push(`local __lauaAsync = (function()\n${LAUA_ASYNC_RUNTIME_SOURCE}\nend)()`);
+      if (/\b__lauaCore\./.test(masked)) fragments.push(`local __lauaCore = (function()\n${compactLauaCoreRuntime(source)}\nend)()`);
+      if (/\b__lauaSignal\./.test(masked)) fragments.push(`local __lauaSignal = (function()\n${LAUA_SIGNAL_RUNTIME_SOURCE}\nend)()`);
       if (!fragments.length) return source;
       const lines = source.split("\n");
       let at = 0;
@@ -5888,16 +5915,18 @@ local part = message[1:7]`;
 
       function compileProjectFiles() {
         const result=[];
-        const failures=[];
+        // Never discard a source file because another file fails to compile.
         for (const file of projectFiles.values()) {
-          const extra=projectImportMarkers(file);
-          if (extra.length) { failures.push(`${file.name}: ${extra.map(m=>m.message).join("; ")}`);continue; }
-          try {
-            const output=transpile(file.model.getValue(),{Mode:modeSelection()});
-            result.push({sourceName:file.name,source:file.model.getValue(),outputName:removeLauaExtension(file.name)+".luau",output});
-          } catch (error) {failures.push(`${file.name}: ${error?.message || String(error)}`);}
+          const entry={sourceName:file.name,source:file.model.getValue(),outputName:removeLauaExtension(file.name)+".luau",output:null,error:null};
+          const importErrors=projectImportMarkers(file);
+          if (importErrors.length) {
+            entry.error=importErrors.map(marker=>marker.message).join("; ");
+          } else {
+            try {entry.output=transpile(entry.source,{Mode:modeSelection()});}
+            catch (error) {entry.error=error?.message || String(error);}
+          }
+          result.push(entry);
         }
-        if (failures.length) throw new Error(`Project export stopped: ${failures.join(" | ")}`);
         return result;
       }
 
@@ -5946,14 +5975,25 @@ local part = message[1:7]`;
         try {
           const all=compileProjectFiles();
           const entries=[];
+          const failures=[];
+          let generatedCount=0;
           for(const item of all) {
+            // Every tab, including empty and uncompiled files, goes into ZIP.
             entries.push({name:"source/"+item.sourceName,content:item.source});
-            entries.push({name:"luau/"+item.outputName,content:item.output});
+            if (item.error) {
+              failures.push(`${item.sourceName}: ${item.error}`);
+            } else {
+              entries.push({name:"luau/"+item.outputName,content:item.output});
+              generatedCount++;
+            }
+          }
+          if (failures.length) {
+            entries.push({name:"COMPILATION_ERRORS.txt",content:"The Laua source files were all exported. Some generated Luau files were omitted because compilation failed.\n\n"+failures.join("\n")+"\n"});
           }
           const zip=makeProjectZip(entries);
-          downloadProjectBlob("Laua-v3.11-project.zip",zip);
-          projectStatus().textContent=`Exported ${all.length} Laua files + ${all.length} Luau outputs.`;
-          projectStatus().className="ok";
+          downloadProjectBlob("Laua-v3.14-project.zip",zip);
+          projectStatus().textContent=`Exported all ${all.length} Laua source files and ${generatedCount} Luau outputs.${failures.length?` ${failures.length} file(s) failed; see COMPILATION_ERRORS.txt in the ZIP.`:""}`;
+          projectStatus().className=failures.length?"error":"ok";
         } catch(error) {
           projectStatus().textContent=error?.message || String(error);
           projectStatus().className="error";
