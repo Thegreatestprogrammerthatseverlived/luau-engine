@@ -1,0 +1,2298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Laua Playground</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; font-family: Inter, system-ui, Arial, sans-serif; background: #0f1115; color: #f4f4f5; }
+    body { display: flex; flex-direction: column; }
+    header {
+      height: 58px; display: flex; align-items: center; justify-content: space-between;
+      padding: 0 18px; border-bottom: 1px solid #2a2f3a; background: #151922;
+    }
+    .brand { display: flex; align-items: baseline; gap: 10px; }
+    .brand h1 { margin: 0; font-size: 20px; }
+    .brand span { color: #9aa4b2; font-size: 13px; }
+    .actions { display: flex; gap: 8px; }
+    button {
+      border: 1px solid #343b49; border-radius: 8px; background: #232936; color: #f4f4f5;
+      padding: 8px 13px; cursor: pointer; font-weight: 600;
+    }
+    button:hover { background: #2b3342; }
+    #transpileBtn { background: #2563eb; border-color: #2563eb; }
+    #transpileBtn:hover { background: #1d4ed8; }
+    main { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
+    .pane { min-width: 0; display: flex; flex-direction: column; }
+    .pane:first-child { border-right: 1px solid #2a2f3a; }
+    .pane-title {
+      height: 38px; display: flex; align-items: center; justify-content: space-between;
+      padding: 0 12px; background: #151922; border-bottom: 1px solid #2a2f3a;
+      color: #cbd5e1; font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    }
+    .editor { flex: 1; min-height: 0; }
+    #status {
+      height: 30px; display: flex; align-items: center; padding: 0 12px;
+      border-top: 1px solid #2a2f3a; background: #151922; color: #94a3b8; font-size: 12px;
+    }
+    .ok { color: #86efac !important; }
+    .error { color: #fca5a5 !important; }
+    @media (max-width: 850px) {
+      main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+      .pane:first-child { border-right: 0; border-bottom: 1px solid #2a2f3a; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>Laua Playground</h1>
+      <span>pronounced “Lawah”</span>
+    </div>
+    <div class="actions">
+      <button id="exampleBtn">Example</button>
+      <button id="clearBtn">Clear</button>
+      <button id="transpileBtn">Transpile</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="pane">
+      <div class="pane-title"><span>Laua</span><span>Ctrl + Enter to transpile</span></div>
+      <div id="lauaEditor" class="editor"></div>
+    </section>
+
+    <section class="pane">
+      <div class="pane-title"><span>Luau Output</span><span>read only</span></div>
+      <div id="luauEditor" class="editor"></div>
+    </section>
+  </main>
+
+  <div id="status">Ready.</div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
+  <script>
+    const LAUA_KEYWORDS = [
+      "class", "extends", "constructor", "private", "public", "protected",
+      "static", "new", "namespace", "super", "abstract", "override", "enum"
+    ];
+
+    const LUAU_KEYWORDS = [
+      "and", "break", "continue", "do", "else", "elseif", "end", "export",
+      "false", "for", "function", "if", "in", "local", "nil", "not", "or",
+      "repeat", "return", "then", "true", "type", "until", "while"
+    ];
+
+    const LUAU_GLOBALS = [
+      "assert", "error", "getfenv", "getmetatable", "ipairs", "loadstring",
+      "newproxy", "next", "pairs", "pcall", "print", "rawequal", "rawget",
+      "rawlen", "rawset", "select", "setfenv", "setmetatable", "tonumber",
+      "tostring", "type", "typeof", "unpack", "xpcall", "_G", "_VERSION",
+      "shared", "game", "workspace", "script", "Enum", "Instance", "CFrame",
+      "Vector2", "Vector3", "UDim", "UDim2", "Color3", "BrickColor",
+      "NumberRange", "NumberSequence", "ColorSequence", "Rect", "Ray",
+      "Region3", "PhysicalProperties", "Random", "DateTime", "TweenInfo",
+      "OverlapParams", "RaycastParams", "Axes", "Faces", "Font"
+    ];
+
+    const ROBLOX_SERVICES = [
+      "Players", "RunService", "UserInputService", "ContextActionService",
+      "ReplicatedStorage", "ServerStorage", "ServerScriptService",
+      "StarterGui", "StarterPlayer", "TweenService", "CollectionService",
+      "HttpService", "DataStoreService", "MemoryStoreService", "MessagingService",
+      "TeleportService", "PathfindingService", "PhysicsService", "Debris",
+      "MarketplaceService", "BadgeService", "LocalizationService", "Lighting",
+      "SoundService", "TextService", "GuiService", "Teams", "Chat",
+      "AssetService", "InsertService", "ProximityPromptService"
+    ];
+
+    const LIBRARY_MEMBERS = {
+      math: [
+        "abs", "acos", "asin", "atan", "atan2", "ceil", "clamp", "cos",
+        "cosh", "deg", "exp", "floor", "fmod", "frexp", "ldexp", "log",
+        "log10", "max", "min", "modf", "noise", "pow", "rad", "random",
+        "randomseed", "round", "sign", "sin", "sinh", "sqrt", "tan", "tanh",
+        "huge", "pi"
+      ],
+      table: [
+        "clear", "clone", "concat", "create", "find", "freeze", "insert",
+        "isfrozen", "maxn", "move", "pack", "remove", "sort", "unpack"
+      ],
+      string: [
+        "byte", "char", "find", "format", "gmatch", "gsub", "len", "lower",
+        "match", "pack", "packsize", "rep", "reverse", "split", "sub",
+        "unpack", "upper"
+      ],
+      task: [
+        "cancel", "defer", "delay", "desynchronize", "spawn", "synchronize", "wait"
+      ],
+      coroutine: [
+        "close", "create", "isyieldable", "resume", "running", "status", "wrap", "yield"
+      ],
+      utf8: [
+        "char", "charpattern", "codes", "codepoint", "graphemes", "len", "nfcnormalize", "nfdnormalize", "offset"
+      ],
+      os: ["clock", "date", "difftime", "time"],
+      bit32: [
+        "arshift", "band", "bnot", "bor", "btest", "bxor", "countlz",
+        "countrz", "extract", "lrotate", "lshift", "replace", "rrotate", "rshift"
+      ],
+      buffer: [
+        "copy", "create", "fill", "fromstring", "len", "readf32", "readf64",
+        "readi8", "readi16", "readi32", "readstring", "readu8", "readu16",
+        "readu32", "tostring", "writef32", "writef64", "writei8", "writei16",
+        "writei32", "writestring", "writeu8", "writeu16", "writeu32"
+      ]
+    };
+
+    const STARTER = `-- Laua playground
+
+enum SchedulerPriority
+    First = 100
+    High = 75
+    Normal = 50
+    Low = 25
+    Last = 0
+end
+
+namespace Scheduler
+    local tasks = {}
+
+    local function countTasks()
+        local amount = 0
+
+        for _ in tasks do
+            amount += 1
+        end
+
+        return amount
+    end
+
+    function Bind(name, callback, priority)
+        tasks[name] = {
+            priority or SchedulerPriority.Normal,
+            callback
+        }
+
+        print("Bound", name, countTasks())
+    end
+end
+
+class Entity
+    constructor(name)
+        self.Name = name
+    end
+
+    public function GetName()
+        return self.Name
+    end
+end
+
+class Zombie extends Entity
+    private Health = 100
+
+    constructor(name, health)
+        super(name)
+        self.Health = health
+    end
+
+    override function GetName()
+        return "Zombie: " .. super:GetName()
+    end
+end
+
+local zombie = new Zombie("Walker", 150)
+print(zombie:GetName())
+`;
+
+    function replaceRange(source, start, end, replacement) {
+      return source.slice(0, start) + replacement + source.slice(end);
+    }
+
+    function normalizeBlockIndent(source, indent = "    ") {
+      const lines = source.replace(/\r\n/g, "\n").split("\n");
+
+      while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+      while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+
+      if (lines.length === 0) return "";
+
+      let smallestIndent = Infinity;
+
+      for (const line of lines) {
+        if (line.trim() === "") continue;
+
+        const leading = line.match(/^[\t ]*/)?.[0].length || 0;
+        if (leading < smallestIndent) smallestIndent = leading;
+      }
+
+      if (!Number.isFinite(smallestIndent)) smallestIndent = 0;
+
+      return lines.map(line => {
+        if (line.trim() === "") return "";
+        return indent + line.slice(smallestIndent);
+      }).join("\n");
+    }
+
+    function isIdent(ch) {
+      return !!ch && /[A-Za-z0-9_]/.test(ch);
+    }
+
+    function maskNonCode(source) {
+      const out = source.split("");
+      let i = 0;
+      let quote = null;
+      let lineComment = false;
+      let blockComment = false;
+
+      while (i < source.length) {
+        const one = source[i];
+        const two = source.slice(i, i + 2);
+        const four = source.slice(i, i + 4);
+
+        if (quote) {
+          if (one === "\\") {
+            out[i] = " ";
+            if (i + 1 < out.length) out[i + 1] = " ";
+            i += 2;
+            continue;
+          }
+          if (one === quote) quote = null;
+          if (one !== "\n") out[i] = " ";
+          i++;
+          continue;
+        }
+
+        if (lineComment) {
+          if (one === "\n") {
+            lineComment = false;
+          } else {
+            out[i] = " ";
+          }
+          i++;
+          continue;
+        }
+
+        if (blockComment) {
+          if (two === "]]") {
+            out[i] = " ";
+            if (i + 1 < out.length) out[i + 1] = " ";
+            blockComment = false;
+            i += 2;
+            continue;
+          }
+          if (one !== "\n") out[i] = " ";
+          i++;
+          continue;
+        }
+
+        if (four === "--[[") {
+          for (let j = 0; j < 4; j++) if (i + j < out.length) out[i + j] = " ";
+          blockComment = true;
+          i += 4;
+          continue;
+        }
+
+        if (two === "--") {
+          out[i] = " ";
+          if (i + 1 < out.length) out[i + 1] = " ";
+          lineComment = true;
+          i += 2;
+          continue;
+        }
+
+        if (one === '"' || one === "'") {
+          quote = one;
+          out[i] = " ";
+          i++;
+          continue;
+        }
+
+        i++;
+      }
+
+      return out.join("");
+    }
+
+    function findKeyword(masked, keyword, from = 0) {
+      let i = from;
+
+      while ((i = masked.indexOf(keyword, i)) !== -1) {
+        const before = masked[i - 1] || "";
+        const after = masked[i + keyword.length] || "";
+
+        const validBefore =
+          !isIdent(before) &&
+          before !== "." &&
+          before !== ":";
+
+        const validAfter = !isIdent(after);
+
+        if (validBefore && validAfter) return i;
+
+        i += keyword.length;
+      }
+
+      return -1;
+    }
+
+    function findMatchingParen(source, openIndex) {
+      const masked = maskNonCode(source);
+      let depth = 0;
+      for (let i = openIndex; i < source.length; i++) {
+        if (masked[i] === "(") depth++;
+        if (masked[i] === ")") {
+          depth--;
+          if (depth === 0) return i;
+        }
+      }
+      throw new Error("Expected ')'");
+    }
+
+    function splitLinesWithOffsets(source) {
+      const lines = [];
+      let start = 0;
+      for (let i = 0; i <= source.length; i++) {
+        if (i === source.length || source[i] === "\n") {
+          lines.push({ start, end: i, text: source.slice(start, i) });
+          start = i + 1;
+        }
+      }
+      return lines;
+    }
+
+    function findMatchingEndByLines(source, startIndex) {
+      const lines = splitLinesWithOffsets(source);
+      const startLine = lines.findIndex(line => startIndex >= line.start && startIndex <= line.end);
+      let depth = 0;
+
+      for (let li = startLine; li < lines.length; li++) {
+        const raw = lines[li].text;
+        const maskedLine = maskNonCode(raw).trim();
+        if (!maskedLine) continue;
+
+        const opens =
+          /^(abstract\s+)?class\b/.test(maskedLine) ||
+          /^namespace\b/.test(maskedLine) ||
+          /^enum\b/.test(maskedLine) ||
+          /^constructor\s*\(/.test(maskedLine) ||
+          /^(public|private|protected|static|override|abstract|\s)*\s*function\b/.test(maskedLine) ||
+          /^function\b/.test(maskedLine) ||
+          /^local\s+function\b/.test(maskedLine) ||
+          /^if\b.*\bthen\s*$/.test(maskedLine) ||
+          /^for\b.*\bdo\s*$/.test(maskedLine) ||
+          /^while\b.*\bdo\s*$/.test(maskedLine) ||
+          /^do\s*$/.test(maskedLine) ||
+          /^repeat\s*$/.test(maskedLine);
+
+        if (opens) depth++;
+
+        if (/^until\b/.test(maskedLine)) {
+          depth--;
+          if (depth === 0) return { start: lines[li].start, end: lines[li].end };
+        }
+
+        if (/^end\b/.test(maskedLine)) {
+          depth--;
+          if (depth === 0) return { start: lines[li].start, end: lines[li].end };
+        }
+      }
+
+      throw new Error("Expected 'end'");
+    }
+
+    function transpileNew(source) {
+      while (true) {
+        const masked = maskNonCode(source);
+        const idx = findKeyword(masked, "new");
+        if (idx === -1) break;
+
+        let i = idx + 3;
+        while (/\s/.test(source[i] || "")) i++;
+
+        const start = i;
+        while (/[A-Za-z0-9_.]/.test(source[i] || "")) i++;
+        const name = source.slice(start, i);
+
+        if (!name) throw new Error("Expected class name after 'new'");
+
+        let p = i;
+        while (/\s/.test(source[p] || "")) p++;
+
+        if (source[p] === "(") {
+          source = source.slice(0, idx) + name + ".new" + source.slice(i);
+        } else {
+          source = source.slice(0, idx) + name + ".new()" + source.slice(i);
+        }
+      }
+
+      return source;
+    }
+
+    function transpileEnum(source) {
+      while (true) {
+        const masked = maskNonCode(source);
+        const idx = findKeyword(masked, "enum");
+        if (idx === -1) break;
+
+        const headerEnd = source.indexOf("\n", idx);
+        if (headerEnd === -1) throw new Error("Enum body expected");
+
+        const header = source.slice(idx, headerEnd).trim();
+        const m = header.match(/^enum\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+        if (!m) throw new Error("Invalid enum declaration");
+
+        const name = m[1];
+        const endPos = findMatchingEndByLines(source, idx);
+        const body = source.slice(headerEnd + 1, endPos.start);
+        const members = [];
+        let auto = 0;
+
+        for (const raw of body.split("\n")) {
+          let line = raw.trim().replace(/,$/, "");
+          if (!line || line.startsWith("--")) continue;
+
+          let mm = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+          if (mm) {
+            members.push(`    ${mm[1]} = ${mm[2]},`);
+          } else {
+            mm = line.match(/^([A-Za-z_][A-Za-z0-9_]*)$/);
+            if (!mm) throw new Error(`Invalid enum member: ${line}`);
+            members.push(`    ${mm[1]} = ${auto},`);
+            auto++;
+          }
+        }
+
+        const result = `local ${name} = table.freeze({\n${members.join("\n")}\n})`;
+        source = source.slice(0, idx) + result + source.slice(endPos.end);
+      }
+
+      return source;
+    }
+
+    function transpileNamespace(source) {
+      while (true) {
+        const masked = maskNonCode(source);
+        const idx = findKeyword(masked, "namespace");
+        if (idx === -1) break;
+
+        const headerEnd = source.indexOf("\n", idx);
+        if (headerEnd === -1) throw new Error("Namespace body expected");
+
+        const lineStart = source.lastIndexOf("\n", idx - 1) + 1;
+        const before = source.slice(lineStart, idx).trim();
+        const returned = before === "return";
+
+        if (before && !returned) {
+          throw new Error("namespace can only be standalone or directly returned");
+        }
+
+        const header = source.slice(idx, headerEnd).trim();
+        const m = header.match(/^namespace\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+        if (!m) throw new Error("Invalid namespace declaration");
+
+        const name = m[1];
+        const endPos = findMatchingEndByLines(source, idx);
+        let body = source.slice(headerEnd + 1, endPos.start);
+
+        const lines = body.split("\n");
+        let depth = 0;
+
+        body = lines.map(line => {
+          const trimmed = line.trim();
+          const indent = line.match(/^\s*/)[0];
+
+          if (depth === 0) {
+            const fn = trimmed.match(/^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$/);
+            if (fn) {
+              depth++;
+              return `${indent}function ${name}.${fn[1]}(${fn[2]})`;
+            }
+
+            const localFn = /^local\s+function\b/.test(trimmed);
+            if (localFn) {
+              depth++;
+              return line;
+            }
+
+            const field = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+            if (field && !/^local\b/.test(trimmed)) {
+              return `${indent}${name}.${field[1]} = ${field[2]}`;
+            }
+          }
+
+          if (/^(function|local\s+function|if|for|while|do|repeat)\b/.test(trimmed) && depth > 0) depth++;
+          if (/^end\b/.test(trimmed) && depth > 0) depth--;
+          if (/^until\b/.test(trimmed) && depth > 0) depth--;
+
+          return line;
+        }).join("\n");
+
+        body = transpileCore(body);
+        body = normalizeBlockIndent(body, "    ");
+
+        const generated = `(function()\n    local ${name} = {}\n${body}${body ? "\n" : ""}    return ${name}\nend)()`;
+
+        if (returned) {
+          source = source.slice(0, idx) + generated + source.slice(endPos.end);
+        } else {
+          source = source.slice(0, idx) + `local ${name} = ${generated}` + source.slice(endPos.end);
+        }
+      }
+
+      return source;
+    }
+
+    function transpileClass(source) {
+      while (true) {
+        let masked = maskNonCode(source);
+        let classIdx = findKeyword(masked, "class");
+        if (classIdx === -1) break;
+
+        const lineStart = source.lastIndexOf("\n", classIdx - 1) + 1;
+        const prefix = source.slice(lineStart, classIdx).trim();
+        const isAbstract = prefix === "abstract";
+        const declStart = isAbstract ? lineStart + source.slice(lineStart, classIdx).indexOf("abstract") : classIdx;
+
+        const headerEnd = source.indexOf("\n", classIdx);
+        if (headerEnd === -1) throw new Error("Class body expected");
+
+        const header = source.slice(classIdx, headerEnd).trim();
+        const hm = header.match(/^class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([A-Za-z_][A-Za-z0-9_.]*))?$/);
+        if (!hm) throw new Error("Invalid class declaration");
+
+        const name = hm[1];
+        const base = hm[2] || null;
+        const endPos = findMatchingEndByLines(source, classIdx);
+        const body = source.slice(headerEnd + 1, endPos.start);
+
+        const fields = [];
+        const statics = [];
+        const methods = [];
+        let constructor = null;
+
+        const lines = splitLinesWithOffsets(body);
+        let li = 0;
+
+        while (li < lines.length) {
+          const raw = lines[li].text;
+          let t = raw.trim();
+          if (!t || t.startsWith("--")) { li++; continue; }
+
+          const ctor = t.match(/^constructor\s*\((.*)\)\s*$/);
+          if (ctor) {
+            const localStart = lines[li].start + raw.indexOf("constructor");
+            const memberEnd = findMatchingEndByLines(body, localStart);
+            const bodyStart = body.indexOf("\n", localStart) + 1;
+            constructor = { params: ctor[1], body: body.slice(bodyStart, memberEnd.start) };
+            li = lines.findIndex(x => x.start > memberEnd.end);
+            if (li === -1) break;
+            continue;
+          }
+
+          let isStatic = false, isOverride = false, isAbstractMethod = false;
+          t = t.replace(/^(public|private|protected)\s+/, "");
+          if (/^static\s+/.test(t)) { isStatic = true; t = t.replace(/^static\s+/, ""); }
+          if (/^override\s+/.test(t)) { isOverride = true; t = t.replace(/^override\s+/, ""); }
+          if (/^abstract\s+/.test(t)) { isAbstractMethod = true; t = t.replace(/^abstract\s+/, ""); }
+
+          const fn = t.match(/^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$/);
+          if (fn) {
+            const functionOffset = raw.indexOf("function");
+            const localStart = lines[li].start + functionOffset;
+            const memberEnd = findMatchingEndByLines(body, localStart);
+            const bodyStart = body.indexOf("\n", localStart) + 1;
+            methods.push({
+              name: fn[1],
+              params: fn[2],
+              body: body.slice(bodyStart, memberEnd.start),
+              static: isStatic,
+              override: isOverride,
+              abstract: isAbstractMethod
+            });
+            li = lines.findIndex(x => x.start > memberEnd.end);
+            if (li === -1) break;
+            continue;
+          }
+
+          const field = t.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+          if (field) {
+            (isStatic ? statics : fields).push({ name: field[1], value: field[2] });
+            li++;
+            continue;
+          }
+
+          li++;
+        }
+
+        let out = `local ${name} = {}\n${name}.__index = ${name}\n`;
+        if (base) out += `setmetatable(${name}, {__index = ${base}})\n`;
+        out += `${name}.__abstract = ${isAbstract ? "true" : "false"}\n`;
+
+        for (const f of statics) out += `${name}.${f.name} = ${transpileCore(f.value)}\n`;
+
+        out += `\nfunction ${name}.__init(self, ...)\n`;
+        if (base) out += `    ${base}.__init(self, ...)\n`;
+        for (const f of fields) out += `    self.${f.name} = ${transpileCore(f.value)}\n`;
+
+        if (constructor) {
+          let cb = constructor.body;
+          if (base) {
+            cb = cb.replace(/\bsuper\s*\(/g, `${base}.__init(self, `);
+            cb = cb.replace(/\bsuper:([A-Za-z_][A-Za-z0-9_]*)\s*\(/g, `${base}.$1(self, `);
+          }
+
+          cb = transpileCore(cb);
+          cb = normalizeBlockIndent(cb, "    ");
+
+          if (cb) out += cb + "\n";
+        }
+        out += "end\n";
+
+        out += `\nfunction ${name}.new(...)\n`;
+        out += `    if ${name}.__abstract then error("Cannot instantiate abstract class '${name}'") end\n`;
+        out += `    local self = setmetatable({}, ${name})\n`;
+        out += `    ${name}.__init(self, ...)\n`;
+        out += `    return self\n`;
+        out += "end\n";
+
+        for (const method of methods) {
+          out += "\n";
+          if (method.abstract) {
+            out += `function ${name}:${method.name}(${method.params})\n`;
+            out += `    error("Abstract method '${name}.${method.name}' must be overridden")\n`;
+            out += "end\n";
+            continue;
+          }
+
+          let mb = method.body;
+          if (base) {
+            mb = mb.replace(/\bsuper:([A-Za-z_][A-Za-z0-9_]*)\s*\(/g, `${base}.$1(self, `);
+            mb = mb.replace(/\bsuper\.([A-Za-z_][A-Za-z0-9_]*)/g, `${base}.$1`);
+          }
+          mb = transpileCore(mb);
+          mb = normalizeBlockIndent(mb, "    ");
+
+          out += method.static
+            ? `function ${name}.${method.name}(${method.params})\n`
+            : `function ${name}:${method.name}(${method.params})\n`;
+
+          if (mb) out += mb + "\n";
+          out += "end\n";
+        }
+
+        source = source.slice(0, declStart) + out + source.slice(endPos.end);
+      }
+
+      return source;
+    }
+
+    function transpileCore(source) {
+      source = transpileEnum(source);
+      source = transpileNamespace(source);
+      source = transpileClass(source);
+      source = transpileNew(source);
+      return source;
+    }
+
+    function transpile(source) {
+      const output = transpileCore(source);
+
+      return output
+        .split("\n")
+        .map(line => line.replace(/[\t ]+$/g, ""))
+        .join("\n");
+    }
+
+
+    function buildLauaSymbolIndex(source) {
+      const symbols = {
+        namespaces: {},
+        enums: {},
+        classes: {},
+        variables: {},
+        locals: {},
+        localFunctions: {},
+        parameters: {}
+      };
+
+      function parseNamespaceMembers(body) {
+        const members = {};
+        const lines = splitLinesWithOffsets(body);
+        let li = 0;
+
+        while (li < lines.length) {
+          const raw = lines[li].text;
+          const trimmed = raw.trim();
+
+          if (!trimmed || trimmed.startsWith("--")) {
+            li++;
+            continue;
+          }
+
+          const localFunction = trimmed.match(/^local\s+function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*(?::\s*.+)?$/);
+          if (localFunction) {
+            try {
+              const start = lines[li].start + raw.indexOf("local");
+              const blockEnd = findMatchingEndByLines(body, start);
+              const nextLine = lines.findIndex(line => line.start > blockEnd.end);
+              if (nextLine === -1) break;
+              li = nextLine;
+              continue;
+            } catch {
+              li++;
+              continue;
+            }
+          }
+
+          const exportedFunction = trimmed.match(/^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*(?::\s*.+)?$/);
+          if (exportedFunction) {
+            members[exportedFunction[1]] = {
+              kind: "function",
+              params: exportedFunction[2],
+              detail: "Laua namespace function"
+            };
+
+            try {
+              const start = lines[li].start + raw.indexOf("function");
+              const blockEnd = findMatchingEndByLines(body, start);
+              const nextLine = lines.findIndex(line => line.start > blockEnd.end);
+              if (nextLine === -1) break;
+              li = nextLine;
+              continue;
+            } catch {
+              li++;
+              continue;
+            }
+          }
+
+          const field = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=]+)?\s*=\s*(.+)$/);
+          if (field && !trimmed.startsWith("local ")) {
+            members[field[1]] = {
+              kind: "field",
+              detail: "Laua namespace value"
+            };
+          }
+
+          li++;
+        }
+
+        return members;
+      }
+
+      function parseClassMembers(body) {
+        const instanceMembers = {};
+        const staticMembers = {};
+        const lines = splitLinesWithOffsets(body);
+        let li = 0;
+
+        while (li < lines.length) {
+          const raw = lines[li].text;
+          let trimmed = raw.trim();
+
+          if (!trimmed || trimmed.startsWith("--")) {
+            li++;
+            continue;
+          }
+
+          if (/^constructor\s*\(/.test(trimmed)) {
+            try {
+              const start = lines[li].start + raw.indexOf("constructor");
+              const blockEnd = findMatchingEndByLines(body, start);
+              const nextLine = lines.findIndex(line => line.start > blockEnd.end);
+              if (nextLine === -1) break;
+              li = nextLine;
+              continue;
+            } catch {
+              li++;
+              continue;
+            }
+          }
+
+          let isStatic = false;
+          let visibility = "public";
+          let changed = true;
+
+          while (changed) {
+            changed = false;
+
+            const modifier = trimmed.match(/^(public|private|protected|static|override|abstract)\s+/);
+            if (modifier) {
+              if (modifier[1] === "static") isStatic = true;
+              if (modifier[1] === "public" || modifier[1] === "private" || modifier[1] === "protected") {
+                visibility = modifier[1];
+              }
+
+              trimmed = trimmed.slice(modifier[0].length);
+              changed = true;
+            }
+          }
+
+          const fn = trimmed.match(/^function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\((.*?)\)\s*(?::\s*.+)?$/);
+          if (fn) {
+            const target = isStatic ? staticMembers : instanceMembers;
+
+            target[fn[1]] = {
+              kind: "function",
+              params: fn[2],
+              visibility,
+              detail: isStatic ? "Laua static method" : `Laua ${visibility} method`
+            };
+
+            try {
+              const functionOffset = raw.indexOf("function");
+              const start = lines[li].start + functionOffset;
+              const blockEnd = findMatchingEndByLines(body, start);
+              const nextLine = lines.findIndex(line => line.start > blockEnd.end);
+              if (nextLine === -1) break;
+              li = nextLine;
+              continue;
+            } catch {
+              li++;
+              continue;
+            }
+          }
+
+          const field = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=]+)?\s*=\s*(.+)$/);
+          if (field) {
+            const target = isStatic ? staticMembers : instanceMembers;
+
+            target[field[1]] = {
+              kind: "field",
+              visibility,
+              detail: isStatic ? "Laua static field" : `Laua ${visibility} field`
+            };
+          }
+
+          li++;
+        }
+
+        return { instanceMembers, staticMembers };
+      }
+
+      let masked = maskNonCode(source);
+
+      let search = 0;
+      while (true) {
+        const idx = findKeyword(masked, "namespace", search);
+        if (idx === -1) break;
+
+        const headerEnd = source.indexOf("\n", idx);
+        if (headerEnd === -1) break;
+
+        const header = source.slice(idx, headerEnd).trim();
+        const match = header.match(/^namespace\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+
+        if (!match) {
+          search = idx + 9;
+          continue;
+        }
+
+        try {
+          const endPos = findMatchingEndByLines(source, idx);
+          const body = source.slice(headerEnd + 1, endPos.start);
+
+          symbols.namespaces[match[1]] = {
+            name: match[1],
+            members: parseNamespaceMembers(body),
+            start: idx,
+            end: endPos.end
+          };
+
+          search = endPos.end;
+        } catch {
+          search = idx + 9;
+        }
+      }
+
+      search = 0;
+      while (true) {
+        const idx = findKeyword(masked, "enum", search);
+        if (idx === -1) break;
+
+        const headerEnd = source.indexOf("\n", idx);
+        if (headerEnd === -1) break;
+
+        const header = source.slice(idx, headerEnd).trim();
+        const match = header.match(/^enum\s+([A-Za-z_][A-Za-z0-9_]*)$/);
+
+        if (!match) {
+          search = idx + 4;
+          continue;
+        }
+
+        try {
+          const endPos = findMatchingEndByLines(source, idx);
+          const body = source.slice(headerEnd + 1, endPos.start);
+          const members = {};
+
+          for (const raw of body.split("\n")) {
+            const trimmed = raw.trim().replace(/,$/, "");
+            if (!trimmed || trimmed.startsWith("--")) continue;
+
+            const member = trimmed.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s*=\s*.+)?$/);
+            if (!member) continue;
+
+            members[member[1]] = {
+              kind: "enum",
+              detail: `Laua enum member of ${match[1]}`
+            };
+          }
+
+          symbols.enums[match[1]] = {
+            name: match[1],
+            members,
+            start: idx,
+            end: endPos.end
+          };
+
+          search = endPos.end;
+        } catch {
+          search = idx + 4;
+        }
+      }
+
+      search = 0;
+      while (true) {
+        const idx = findKeyword(masked, "class", search);
+        if (idx === -1) break;
+
+        const headerEnd = source.indexOf("\n", idx);
+        if (headerEnd === -1) break;
+
+        const header = source.slice(idx, headerEnd).trim();
+        const match = header.match(/^class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+([A-Za-z_][A-Za-z0-9_.]*))?$/);
+
+        if (!match) {
+          search = idx + 5;
+          continue;
+        }
+
+        try {
+          const endPos = findMatchingEndByLines(source, idx);
+          const body = source.slice(headerEnd + 1, endPos.start);
+          const members = parseClassMembers(body);
+
+          symbols.classes[match[1]] = {
+            name: match[1],
+            base: match[2] || null,
+            instanceMembers: members.instanceMembers,
+            staticMembers: members.staticMembers,
+            start: idx,
+            end: endPos.end
+          };
+
+          search = endPos.end;
+        } catch {
+          search = idx + 5;
+        }
+      }
+
+      masked = maskNonCode(source);
+
+      const newVariablePattern = /\b(?:local\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*[^=\n]+)?\s*=\s*new\s+([A-Za-z_][A-Za-z0-9_.]*)(?:\s*\()?/g;
+      let variableMatch;
+
+      while ((variableMatch = newVariablePattern.exec(masked)) !== null) {
+        symbols.variables[variableMatch[1]] = {
+          kind: "instance",
+          className: variableMatch[2]
+        };
+      }
+
+      const maskedForLocals = maskNonCode(source);
+
+      const localVariablePattern = /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([^=\n]+))?(?:\s*=\s*([^\n]+))?/g;
+      let localVariableMatch;
+
+      while ((localVariableMatch = localVariablePattern.exec(maskedForLocals)) !== null) {
+        const name = localVariableMatch[1];
+
+        if (source.slice(localVariableMatch.index, localVariableMatch.index + localVariableMatch[0].length).match(/\blocal\s+function\b/)) {
+          continue;
+        }
+
+        symbols.locals[name] = {
+          name,
+          type: localVariableMatch[2]?.trim() || null,
+          detail: localVariableMatch[2]?.trim()
+            ? `Local variable: ${localVariableMatch[2].trim()}`
+            : "Local variable"
+        };
+      }
+
+      const localFunctionPattern = /\blocal\s+function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)/g;
+      let localFunctionMatch;
+
+      while ((localFunctionMatch = localFunctionPattern.exec(maskedForLocals)) !== null) {
+        const name = localFunctionMatch[1];
+        const params = localFunctionMatch[2].trim();
+
+        symbols.localFunctions[name] = {
+          name,
+          params,
+          detail: "Local function"
+        };
+      }
+
+      const functionPattern = /\b(?:local\s+)?function\s+[A-Za-z_][A-Za-z0-9_.:]*\s*\(([^)]*)\)/g;
+      let functionMatch;
+
+      while ((functionMatch = functionPattern.exec(maskedForLocals)) !== null) {
+        const params = functionMatch[1]
+          .split(",")
+          .map(param => param.trim())
+          .filter(Boolean);
+
+        for (const param of params) {
+          const paramMatch = param.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*(.+))?$/);
+          if (!paramMatch) continue;
+
+          symbols.parameters[paramMatch[1]] = {
+            name: paramMatch[1],
+            type: paramMatch[2]?.trim() || null,
+            detail: paramMatch[2]?.trim()
+              ? `Function parameter: ${paramMatch[2].trim()}`
+              : "Function parameter"
+          };
+        }
+      }
+
+      const anonymousFunctionPattern = /\bfunction\s*\(([^)]*)\)/g;
+      let anonymousFunctionMatch;
+
+      while ((anonymousFunctionMatch = anonymousFunctionPattern.exec(maskedForLocals)) !== null) {
+        const params = anonymousFunctionMatch[1]
+          .split(",")
+          .map(param => param.trim())
+          .filter(Boolean);
+
+        for (const param of params) {
+          const paramMatch = param.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:\s*:\s*(.+))?$/);
+          if (!paramMatch) continue;
+
+          symbols.parameters[paramMatch[1]] = {
+            name: paramMatch[1],
+            type: paramMatch[2]?.trim() || null,
+            detail: paramMatch[2]?.trim()
+              ? `Function parameter: ${paramMatch[2].trim()}`
+              : "Function parameter"
+          };
+        }
+      }
+
+      return symbols;
+    }
+
+    function collectClassMembers(symbols, className, staticOnly = false, seen = new Set()) {
+      if (!className || seen.has(className)) return {};
+
+      const classInfo = symbols.classes[className];
+      if (!classInfo) return {};
+
+      seen.add(className);
+
+      const inherited = classInfo.base
+        ? collectClassMembers(symbols, classInfo.base, staticOnly, seen)
+        : {};
+
+      return {
+        ...inherited,
+        ...(staticOnly ? classInfo.staticMembers : classInfo.instanceMembers)
+      };
+    }
+
+    function findClassAtOffset(symbols, offset) {
+      let best = null;
+
+      for (const classInfo of Object.values(symbols.classes)) {
+        if (offset < classInfo.start || offset > classInfo.end) continue;
+
+        if (!best || (classInfo.end - classInfo.start) < (best.end - best.start)) {
+          best = classInfo;
+        }
+      }
+
+      return best;
+    }
+
+
+    const LAUA_DOCS = {
+      class: "Declares a Laua class. Classes transpile to Luau tables and metatables.",
+      extends: "Makes a class inherit from another Laua class.",
+      constructor: "Declares the initializer used when an instance is created with new.",
+      private: "Marks a class member as private.",
+      public: "Marks a class member as public.",
+      protected: "Marks a class member as accessible to the class and subclasses.",
+      static: "Makes a member belong to the class itself instead of each instance.",
+      new: "Creates an instance of a Laua class. Parentheses are optional when there are no arguments.",
+      namespace: "Creates a scoped table-like namespace. Normal functions are exported; local functions remain private.",
+      super: "Accesses the parent class. super(...) calls the parent constructor and super:Method(...) calls a parent method.",
+      abstract: "Declares a class or method that cannot be used directly until required methods are implemented.",
+      override: "Marks a method as replacing a method inherited from the parent class.",
+      enum: "Declares a frozen set of named values."
+    };
+
+    const BUILTIN_MEMBER_SETS = {
+      Vector3: {
+        new: "function", zero: "field", one: "field", xAxis: "field", yAxis: "field", zAxis: "field",
+        FromNormalId: "function", FromAxis: "function", Dot: "function", Cross: "function", Lerp: "function",
+        FuzzyEq: "function", Angle: "function", Abs: "function", Ceil: "function", Floor: "function",
+        Sign: "function", Magnitude: "field", Unit: "field", X: "field", Y: "field", Z: "field"
+      },
+      Vector2: {
+        new: "function", zero: "field", one: "field", xAxis: "field", yAxis: "field",
+        Dot: "function", Cross: "function", Lerp: "function", FuzzyEq: "function", Angle: "function",
+        Abs: "function", Ceil: "function", Floor: "function", Sign: "function", Magnitude: "field",
+        Unit: "field", X: "field", Y: "field"
+      },
+      CFrame: {
+        new: "function", Angles: "function", fromEulerAnglesXYZ: "function", fromEulerAnglesYXZ: "function",
+        fromOrientation: "function", lookAt: "function", fromMatrix: "function", identity: "field",
+        Position: "field", Rotation: "field", LookVector: "field", RightVector: "field", UpVector: "field",
+        Inverse: "function", Lerp: "function", ToWorldSpace: "function", ToObjectSpace: "function",
+        PointToWorldSpace: "function", PointToObjectSpace: "function", VectorToWorldSpace: "function",
+        VectorToObjectSpace: "function", GetComponents: "function", ToEulerAnglesXYZ: "function",
+        ToOrientation: "function"
+      },
+      Color3: {
+        new: "function", fromRGB: "function", fromHSV: "function", fromHex: "function",
+        ToHSV: "function", ToHex: "function", Lerp: "function", R: "field", G: "field", B: "field"
+      },
+      UDim2: {
+        new: "function", fromOffset: "function", fromScale: "function", X: "field", Y: "field",
+        Width: "field", Height: "field"
+      },
+      Instance: {
+        new: "function"
+      },
+      RemoteEvent: {
+        FireServer: "function", FireClient: "function", FireAllClients: "function",
+        OnServerEvent: "field", OnClientEvent: "field", Destroy: "function",
+        FindFirstChild: "function", WaitForChild: "function", GetAttribute: "function", SetAttribute: "function"
+      },
+      RemoteFunction: {
+        InvokeServer: "function", InvokeClient: "function", OnServerInvoke: "field", OnClientInvoke: "field",
+        Destroy: "function", FindFirstChild: "function", WaitForChild: "function"
+      },
+      Player: {
+        Character: "field", UserId: "field", Name: "field", DisplayName: "field", Team: "field",
+        CharacterAdded: "field", CharacterRemoving: "field", GetMouse: "function", Kick: "function",
+        LoadCharacter: "function", GetAttribute: "function", SetAttribute: "function"
+      },
+      Model: {
+        PrimaryPart: "field", WorldPivot: "field", PivotTo: "function", GetPivot: "function",
+        MoveTo: "function", GetBoundingBox: "function", GetScale: "function", ScaleTo: "function",
+        FindFirstChild: "function", WaitForChild: "function", GetDescendants: "function", Destroy: "function"
+      },
+      BasePart: {
+        Position: "field", CFrame: "field", Size: "field", Velocity: "field", AssemblyLinearVelocity: "field",
+        AssemblyAngularVelocity: "field", Anchored: "field", CanCollide: "field", Touched: "field",
+        ApplyImpulse: "function", GetTouchingParts: "function", FindFirstChild: "function", Destroy: "function"
+      },
+      Humanoid: {
+        Health: "field", MaxHealth: "field", WalkSpeed: "field", JumpPower: "field", JumpHeight: "field",
+        MoveDirection: "field", RootPart: "field", Move: "function", TakeDamage: "function",
+        ChangeState: "function", GetState: "function", LoadAnimation: "function", Died: "field"
+      }
+    };
+
+    const SERVICE_MEMBER_SETS = {
+      Players: {
+        LocalPlayer: "field", PlayerAdded: "field", PlayerRemoving: "field", GetPlayers: "function",
+        GetPlayerFromCharacter: "function", GetPlayerByUserId: "function", CreateHumanoidModelFromUserId: "function"
+      },
+      RunService: {
+        Heartbeat: "field", RenderStepped: "field", Stepped: "field", FixedHeartbeat: "field",
+        PreSimulation: "field", PostSimulation: "field", BindToRenderStep: "function",
+        UnbindFromRenderStep: "function", IsClient: "function", IsServer: "function", IsStudio: "function"
+      },
+      UserInputService: {
+        InputBegan: "field", InputChanged: "field", InputEnded: "field", TouchEnabled: "field",
+        GamepadEnabled: "field", KeyboardEnabled: "field", IsKeyDown: "function",
+        IsMouseButtonPressed: "function", GetMouseLocation: "function", GetKeysPressed: "function"
+      },
+      TweenService: {
+        Create: "function", GetValue: "function", SmoothDamp: "function"
+      },
+      CollectionService: {
+        AddTag: "function", RemoveTag: "function", HasTag: "function", GetTags: "function",
+        GetTagged: "function", GetInstanceAddedSignal: "function", GetInstanceRemovedSignal: "function"
+      },
+      HttpService: {
+        JSONEncode: "function", JSONDecode: "function", GenerateGUID: "function",
+        UrlEncode: "function", RequestAsync: "function", GetAsync: "function", PostAsync: "function"
+      },
+      DataStoreService: {
+        GetDataStore: "function", GetOrderedDataStore: "function", GetGlobalDataStore: "function",
+        ListDataStoresAsync: "function"
+      },
+      PathfindingService: {
+        CreatePath: "function", FindPathAsync: "function"
+      },
+      ContextActionService: {
+        BindAction: "function", BindActionAtPriority: "function", UnbindAction: "function",
+        GetAllBoundActionInfo: "function", SetTitle: "function", SetPosition: "function"
+      },
+      ReplicatedStorage: {
+        FindFirstChild: "function", WaitForChild: "function", GetChildren: "function", GetDescendants: "function"
+      }
+    };
+
+    function membersToCompletionMap(rawMembers, detailPrefix) {
+      const result = {};
+
+      for (const [name, kind] of Object.entries(rawMembers || {})) {
+        result[name] = {
+          kind,
+          detail: `${detailPrefix} ${kind === "function" ? "method" : "member"}`
+        };
+      }
+
+      return result;
+    }
+
+    function getWordRange(model, position) {
+      const word = model.getWordUntilPosition(position);
+
+      return new monaco.Range(
+        position.lineNumber,
+        word.startColumn,
+        position.lineNumber,
+        word.endColumn
+      );
+    }
+
+    function getSymbolMembers(symbols, owner, operator, cursorOffset) {
+      if (LIBRARY_MEMBERS[owner]) {
+        const result = {};
+
+        for (const member of LIBRARY_MEMBERS[owner]) {
+          result[member] = {
+            kind: "function",
+            detail: `${owner}.${member}`
+          };
+        }
+
+        return result;
+      }
+
+      if (BUILTIN_MEMBER_SETS[owner]) {
+        return membersToCompletionMap(BUILTIN_MEMBER_SETS[owner], owner);
+      }
+
+      if (SERVICE_MEMBER_SETS[owner]) {
+        return membersToCompletionMap(SERVICE_MEMBER_SETS[owner], owner);
+      }
+
+      if (symbols.namespaces[owner]) return symbols.namespaces[owner].members;
+      if (symbols.enums[owner]) return symbols.enums[owner].members;
+      if (symbols.classes[owner]) return collectClassMembers(symbols, owner, true);
+      if (symbols.variables[owner]) return collectClassMembers(symbols, symbols.variables[owner].className, false);
+
+      const localInfo = symbols.locals[owner];
+      if (localInfo) {
+        const typeName = localInfo.type?.replace(/\?$/, "").trim();
+
+        if (typeName && symbols.classes[typeName]) {
+          return collectClassMembers(symbols, typeName, false);
+        }
+
+        if (typeName && BUILTIN_MEMBER_SETS[typeName]) {
+          return membersToCompletionMap(BUILTIN_MEMBER_SETS[typeName], typeName);
+        }
+
+        if (typeName && SERVICE_MEMBER_SETS[typeName]) {
+          return membersToCompletionMap(SERVICE_MEMBER_SETS[typeName], typeName);
+        }
+
+        if (localInfo.service && SERVICE_MEMBER_SETS[localInfo.service]) {
+          return membersToCompletionMap(SERVICE_MEMBER_SETS[localInfo.service], localInfo.service);
+        }
+
+        if (localInfo.alias) {
+          if (symbols.namespaces[localInfo.alias]) return symbols.namespaces[localInfo.alias].members;
+          if (symbols.enums[localInfo.alias]) return symbols.enums[localInfo.alias].members;
+          if (symbols.classes[localInfo.alias]) return collectClassMembers(symbols, localInfo.alias, true);
+        }
+
+        if (localInfo.tableMembers) return localInfo.tableMembers;
+      }
+
+      const parameterInfo = symbols.parameters[owner];
+      if (parameterInfo?.type) {
+        const typeName = parameterInfo.type.replace(/\?$/, "").trim();
+
+        if (symbols.classes[typeName]) return collectClassMembers(symbols, typeName, false);
+        if (BUILTIN_MEMBER_SETS[typeName]) return membersToCompletionMap(BUILTIN_MEMBER_SETS[typeName], typeName);
+        if (SERVICE_MEMBER_SETS[typeName]) return membersToCompletionMap(SERVICE_MEMBER_SETS[typeName], typeName);
+      }
+
+      const enclosingClass = findClassAtOffset(symbols, cursorOffset);
+
+      if (owner === "self" && enclosingClass) {
+        return collectClassMembers(symbols, enclosingClass.name, false);
+      }
+
+      if (owner === "super" && enclosingClass?.base) {
+        return collectClassMembers(symbols, enclosingClass.base, operator === ".");
+      }
+
+      if (owner === "game") {
+        return membersToCompletionMap({
+          GetService: "function", FindService: "function", GetObjects: "function",
+          BindToClose: "function", IsLoaded: "function", Loaded: "field"
+        }, "DataModel");
+      }
+
+      if (owner === "workspace") {
+        return membersToCompletionMap({
+          CurrentCamera: "field", Gravity: "field", DistributedGameTime: "field",
+          Raycast: "function", Blockcast: "function", Spherecast: "function", Shapecast: "function",
+          GetPartBoundsInBox: "function", GetPartBoundsInRadius: "function", GetPartsInPart: "function",
+          FindFirstChild: "function", WaitForChild: "function", GetServerTimeNow: "function"
+        }, "Workspace");
+      }
+
+      return null;
+    }
+
+    function enrichLocalSymbols(source, symbols) {
+      const servicePattern = /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*game:GetService\s*\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*\)/g;
+      let match;
+
+      while ((match = servicePattern.exec(source)) !== null) {
+        if (!symbols.locals[match[1]]) {
+          symbols.locals[match[1]] = { name: match[1], type: null, detail: "Local variable" };
+        }
+
+        symbols.locals[match[1]].service = match[2];
+        symbols.locals[match[1]].detail = `Roblox service: ${match[2]}`;
+      }
+
+      const aliasPattern = /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*(?:\n|$)/g;
+
+      while ((match = aliasPattern.exec(source)) !== null) {
+        const target = match[2];
+
+        if (symbols.namespaces[target] || symbols.enums[target] || symbols.classes[target]) {
+          if (!symbols.locals[match[1]]) {
+            symbols.locals[match[1]] = { name: match[1], type: null, detail: "Local variable" };
+          }
+
+          symbols.locals[match[1]].alias = target;
+          symbols.locals[match[1]].detail = `Alias of ${target}`;
+        }
+      }
+
+      const tablePattern = /\blocal\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{([^{}\n]*)\}/g;
+
+      while ((match = tablePattern.exec(source)) !== null) {
+        const members = {};
+        const fieldPattern = /([A-Za-z_][A-Za-z0-9_]*)\s*=/g;
+        let fieldMatch;
+
+        while ((fieldMatch = fieldPattern.exec(match[2])) !== null) {
+          members[fieldMatch[1]] = {
+            kind: "field",
+            detail: "Local table field"
+          };
+        }
+
+        if (Object.keys(members).length > 0) {
+          if (!symbols.locals[match[1]]) {
+            symbols.locals[match[1]] = { name: match[1], type: null, detail: "Local variable" };
+          }
+
+          symbols.locals[match[1]].tableMembers = members;
+        }
+      }
+
+      for (const [name, info] of Object.entries(symbols.locals)) {
+        const typeName = info.type?.replace(/\?$/, "").trim();
+
+        if (typeName && symbols.classes[typeName]) {
+          symbols.variables[name] = {
+            kind: "instance",
+            className: typeName
+          };
+        }
+      }
+
+      return symbols;
+    }
+
+    function getLauaSymbols(source) {
+      return enrichLocalSymbols(source, buildLauaSymbolIndex(source));
+    }
+
+    function makeRangeFromOffsets(model, start, end) {
+      const a = model.getPositionAt(start);
+      const b = model.getPositionAt(end);
+
+      return new monaco.Range(a.lineNumber, a.column, b.lineNumber, b.column);
+    }
+
+    function updateLauaDiagnostics(model) {
+      if (model.getLanguageId() !== "laua") return;
+
+      const source = model.getValue();
+      const masked = maskNonCode(source);
+      const symbols = getLauaSymbols(source);
+      const markers = [];
+
+      const pushMarker = (start, end, severity, message) => {
+        const range = makeRangeFromOffsets(model, start, end);
+
+        markers.push({
+          severity,
+          message,
+          startLineNumber: range.startLineNumber,
+          startColumn: range.startColumn,
+          endLineNumber: range.endLineNumber,
+          endColumn: range.endColumn
+        });
+      };
+
+      const newPattern = /\bnew\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+      let match;
+
+      while ((match = newPattern.exec(masked)) !== null) {
+        const className = match[1];
+
+        if (!symbols.classes[className]) {
+          const nameStart = match.index + match[0].lastIndexOf(className);
+          pushMarker(
+            nameStart,
+            nameStart + className.length,
+            monaco.MarkerSeverity.Warning,
+            `Unknown Laua class '${className}'.`
+          );
+        }
+      }
+
+      const extendsPattern = /\bextends\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+
+      while ((match = extendsPattern.exec(masked)) !== null) {
+        const className = match[1];
+
+        if (!symbols.classes[className]) {
+          const nameStart = match.index + match[0].lastIndexOf(className);
+          pushMarker(
+            nameStart,
+            nameStart + className.length,
+            monaco.MarkerSeverity.Warning,
+            `Unknown parent class '${className}'.`
+          );
+        }
+      }
+
+      const superPattern = /\bsuper\b/g;
+
+      while ((match = superPattern.exec(masked)) !== null) {
+        const enclosingClass = findClassAtOffset(symbols, match.index);
+
+        if (!enclosingClass) {
+          pushMarker(
+            match.index,
+            match.index + 5,
+            monaco.MarkerSeverity.Error,
+            "'super' can only be used inside a class."
+          );
+        } else if (!enclosingClass.base) {
+          pushMarker(
+            match.index,
+            match.index + 5,
+            monaco.MarkerSeverity.Error,
+            `'${enclosingClass.name}' does not extend another class, so 'super' is unavailable.`
+          );
+        }
+      }
+
+      const declarationPattern = /\b(class|namespace|enum)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
+      const seen = new Map();
+
+      while ((match = declarationPattern.exec(masked)) !== null) {
+        const key = `${match[1]}:${match[2]}`;
+
+        if (seen.has(key)) {
+          const nameStart = match.index + match[0].lastIndexOf(match[2]);
+          pushMarker(
+            nameStart,
+            nameStart + match[2].length,
+            monaco.MarkerSeverity.Warning,
+            `Duplicate ${match[1]} '${match[2]}'.`
+          );
+        } else {
+          seen.set(key, match.index);
+        }
+      }
+
+      monaco.editor.setModelMarkers(model, "laua", markers);
+    }
+
+    require.config({
+      paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs" }
+    });
+
+    require(["vs/editor/editor.main"], function () {
+      monaco.languages.register({ id: "laua" });
+
+      monaco.languages.setMonarchTokensProvider("laua", {
+        defaultToken: "",
+        tokenPostfix: ".laua",
+
+        keywords: LUAU_KEYWORDS,
+        lauaKeywords: LAUA_KEYWORDS,
+        typeKeywords: [
+          "any", "unknown", "never", "nil", "boolean", "number", "string", "thread", "buffer",
+          "Vector2", "Vector3", "CFrame", "Color3", "UDim", "UDim2", "Instance", "Player",
+          "Model", "BasePart", "Humanoid", "RemoteEvent", "RemoteFunction"
+        ],
+
+        operators: [
+          "+", "-", "*", "/", "//", "%", "^", "#", "==", "~=", "!=", "<=", ">=", "<", ">",
+          "=", "+=", "-=", "*=", "/=", "//=", "%=", "^=", "..", "..=", "::", "->"
+        ],
+
+        symbols: /[=><!~?:&|+\-*\/\^%#]+/,
+
+        tokenizer: {
+          root: [
+            [/--\[(=*)\[/, { token: "comment", next: "@longComment.$1" }],
+            [/--.*$/, "comment"],
+
+            [/\[(=*)\[/, { token: "string", next: "@longString.$1" }],
+            [/`/, { token: "string.quote", next: "@backtick" }],
+            [/"/, { token: "string.quote", next: "@doubleString" }],
+            [/'/, { token: "string.quote", next: "@singleString" }],
+
+            [/\b(abstract)(\s+)(class)(\s+)([A-Za-z_][A-Za-z0-9_]*)/,
+              ["keyword.laua", "", "keyword.laua", "", "type.identifier"]],
+            [/\b(class|namespace|enum)(\s+)([A-Za-z_][A-Za-z0-9_]*)/,
+              ["keyword.laua", "", "type.identifier"]],
+            [/\b(function)(\s+)([A-Za-z_][A-Za-z0-9_]*)/,
+              ["keyword", "", "function"]],
+            [/\b(constructor)(\s*)(\()/,
+              ["keyword.laua", "", "@brackets"]],
+            [/\b(public|private|protected|static|override|abstract|extends|new|super)\b/, "keyword.laua"],
+
+            [/[A-Za-z_][A-Za-z0-9_]*/, {
+              cases: {
+                "@lauaKeywords": "keyword.laua",
+                "@keywords": "keyword",
+                "@typeKeywords": "type",
+                "true|false": "constant.language",
+                "nil": "constant.language",
+                "@default": "identifier"
+              }
+            }],
+
+            [/\b0[xX][0-9a-fA-F_]+\b/, "number.hex"],
+            [/\b0[bB][01_]+\b/, "number.binary"],
+            [/\b\d[\d_]*(\.\d[\d_]*)?([eE][+\-]?\d[\d_]*)?\b/, "number.float"],
+
+            [/[{}()\[\]]/, "@brackets"],
+            [/[,:;.]/, "delimiter"],
+            [/@symbols/, {
+              cases: {
+                "@operators": "operator",
+                "@default": "operator"
+              }
+            }],
+
+            [/\s+/, "white"]
+          ],
+
+          doubleString: [
+            [/[^\\"]+/, "string"],
+            [/\\./, "string.escape"],
+            [/"/, { token: "string.quote", next: "@pop" }]
+          ],
+
+          singleString: [
+            [/[^\\']+/, "string"],
+            [/\\./, "string.escape"],
+            [/'/, { token: "string.quote", next: "@pop" }]
+          ],
+
+          backtick: [
+            [/\\./, "string.escape"],
+            [/\{/, { token: "delimiter.bracket", next: "@interpolation" }],
+            [/`/, { token: "string.quote", next: "@pop" }],
+            [/[^\\{`]+/, "string"]
+          ],
+
+          interpolation: [
+            [/\}/, { token: "delimiter.bracket", next: "@pop" }],
+            { include: "root" }
+          ],
+
+          longComment: [
+            [/\](=*)\]/, {
+              cases: {
+                "$1==$S2": { token: "comment", next: "@pop" },
+                "@default": "comment"
+              }
+            }],
+            [/./, "comment"]
+          ],
+
+          longString: [
+            [/\](=*)\]/, {
+              cases: {
+                "$1==$S2": { token: "string", next: "@pop" },
+                "@default": "string"
+              }
+            }],
+            [/./, "string"]
+          ]
+        }
+      });
+
+      monaco.languages.setLanguageConfiguration("laua", {
+        comments: {
+          lineComment: "--",
+          blockComment: ["--[[", "]]"]
+        },
+
+        brackets: [
+          ["{", "}"],
+          ["[", "]"],
+          ["(", ")"]
+        ],
+
+        wordPattern: /(-?\d*\.\d\w*)|([^\`\~\!\@\#\%\^\&\*\(\)\-\=\+\[\{\]\}\\\|\;\:\'\"\,\.\<\>\/\?\s]+)/g,
+
+        autoClosingPairs: [
+          { open: "{", close: "}" },
+          { open: "[", close: "]" },
+          { open: "(", close: ")" },
+          { open: '"', close: '"', notIn: ["string", "comment"] },
+          { open: "'", close: "'", notIn: ["string", "comment"] },
+          { open: "`", close: "`", notIn: ["string", "comment"] }
+        ],
+
+        surroundingPairs: [
+          { open: "{", close: "}" },
+          { open: "[", close: "]" },
+          { open: "(", close: ")" },
+          { open: '"', close: '"' },
+          { open: "'", close: "'" },
+          { open: "`", close: "`" }
+        ],
+
+        indentationRules: {
+          increaseIndentPattern: /^\s*(?:(?:abstract\s+)?class\b|namespace\b|enum\b|constructor\s*\(|(?:public\s+|private\s+|protected\s+|static\s+|override\s+|abstract\s+)*function\b|local\s+function\b|function\b|if\b.*\bthen\s*$|for\b.*\bdo\s*$|while\b.*\bdo\s*$|do\s*$|repeat\s*$)/,
+          decreaseIndentPattern: /^\s*(?:end\b|until\b|else\b|elseif\b)/
+        },
+
+        onEnterRules: [
+          {
+            beforeText: /^\s*(?:(?:abstract\s+)?class\b|namespace\b|enum\b|constructor\s*\(|(?:public\s+|private\s+|protected\s+|static\s+|override\s+|abstract\s+)*function\b|local\s+function\b|function\b|if\b.*\bthen\s*$|for\b.*\bdo\s*$|while\b.*\bdo\s*$|do\s*$|repeat\s*$)/,
+            action: { indentAction: monaco.languages.IndentAction.Indent }
+          },
+          {
+            beforeText: /^\s*(?:else|elseif\b.*then)\s*$/,
+            action: { indentAction: monaco.languages.IndentAction.Indent }
+          }
+        ]
+      });
+
+      monaco.languages.registerCompletionItemProvider("laua", {
+        triggerCharacters: [".", ":"],
+
+        provideCompletionItems(model, position) {
+          const word = model.getWordUntilPosition(position);
+          const range = new monaco.Range(
+            position.lineNumber,
+            word.startColumn,
+            position.lineNumber,
+            word.endColumn
+          );
+
+          const lineBefore = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+          const textBefore = model.getValueInRange(
+            new monaco.Range(1, 1, position.lineNumber, position.column)
+          );
+
+          const keywordDocs = {
+            class: "Declare a Laua class.",
+            extends: "Inherit from another Laua class.",
+            constructor: "Declare the constructor for a Laua class.",
+            private: "Mark a class member as private.",
+            public: "Mark a class member as public.",
+            protected: "Mark a class member as protected.",
+            static: "Make a class member belong to the class itself.",
+            new: "Create a new instance of a Laua class.",
+            namespace: "Create a Laua namespace.",
+            super: "Access the parent class or call its constructor.",
+            abstract: "Declare an abstract class or method.",
+            override: "Declare that a method overrides a parent method.",
+            enum: "Declare a Laua enum."
+          };
+
+          const makeKeyword = (label, detail = "Luau keyword") => ({
+            label,
+            kind: monaco.languages.CompletionItemKind.Keyword,
+            insertText: label,
+            detail,
+            documentation: keywordDocs[label] || undefined,
+            range
+          });
+
+          const suggestions = [
+            ...LUAU_KEYWORDS.map(k => makeKeyword(k)),
+            ...LAUA_KEYWORDS.map(k => makeKeyword(k, "Laua keyword")),
+            ...LUAU_GLOBALS.map(label => ({
+              label,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              insertText: label,
+              detail: "Luau / Roblox global",
+              range
+            }))
+          ];
+
+          const snippet = (label, insertText, detail, documentation) => ({
+            label,
+            kind: monaco.languages.CompletionItemKind.Snippet,
+            insertText,
+            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+            detail,
+            documentation,
+            range
+          });
+
+          suggestions.push(
+            snippet("if", "if ${1:condition} then\n\t$0\nend", "Luau snippet", "Create an if statement."),
+            snippet("if / else", "if ${1:condition} then\n\t${2}\nelse\n\t$0\nend", "Luau snippet", "Create an if/else statement."),
+            snippet("if / elseif / else", "if ${1:condition} then\n\t${2}\nelseif ${3:condition} then\n\t${4}\nelse\n\t$0\nend", "Luau snippet", "Create a full conditional chain."),
+            snippet("while", "while ${1:condition} do\n\t$0\nend", "Luau snippet", "Create a while loop."),
+            snippet("repeat until", "repeat\n\t$0\nuntil ${1:condition}", "Luau snippet", "Create a repeat-until loop."),
+            snippet("for numeric", "for ${1:i} = ${2:1}, ${3:10} do\n\t$0\nend", "Luau snippet", "Create a numeric for loop."),
+            snippet("for generic", "for ${1:key}, ${2:value} in ${3:table} do\n\t$0\nend", "Luau snippet", "Create a Luau generalized iteration loop."),
+            snippet("function", "function ${1:Name}(${2})\n\t$0\nend", "Luau snippet", "Create a function."),
+            snippet("local function", "local function ${1:Name}(${2})\n\t$0\nend", "Luau snippet", "Create a local function."),
+            snippet("typed function", "local function ${1:Name}(${2:value}: ${3:any}): ${4:any}\n\t$0\nend", "Luau snippet", "Create a typed Luau function."),
+            snippet("anonymous function", "function(${1})\n\t$0\nend", "Luau snippet", "Create an anonymous function."),
+            snippet("local variable", "local ${1:name} = ${2:value}", "Luau snippet", "Declare a local variable."),
+            snippet("typed local", "local ${1:name}: ${2:any} = ${3:value}", "Luau snippet", "Declare a typed local variable."),
+            snippet("type alias", "type ${1:Name} = ${2:any}", "Luau type snippet", "Declare a Luau type alias."),
+            snippet("export type", "export type ${1:Name} = ${2:any}", "Luau type snippet", "Declare an exported Luau type."),
+            snippet("table type", "type ${1:Name} = {\n\t${2:Field}: ${3:any},\n}", "Luau type snippet", "Declare a table type."),
+            snippet("generic type", "type ${1:Name}<${2:T}> = ${3:T}", "Luau type snippet", "Declare a generic type."),
+            snippet("pcall", "local ${1:success}, ${2:result} = pcall(function()\n\t$0\nend)", "Luau snippet", "Protected function call."),
+            snippet("xpcall", "local ${1:success}, ${2:result} = xpcall(function()\n\t$0\nend, function(${3:err})\n\treturn ${3:err}\nend)", "Luau snippet", "Protected call with an error handler."),
+            snippet("task.spawn", "task.spawn(function()\n\t$0\nend)", "Luau task snippet", "Spawn a task."),
+            snippet("task.defer", "task.defer(function()\n\t$0\nend)", "Luau task snippet", "Defer a task."),
+            snippet("task.delay", "task.delay(${1:1}, function()\n\t$0\nend)", "Luau task snippet", "Run code after a delay."),
+            snippet("require", "local ${1:Module} = require(${2:script.Parent.Module})", "Roblox snippet", "Require a ModuleScript."),
+            snippet("Instance.new", "local ${1:instance} = Instance.new(\"${2:Part}\")\n${1:instance}.Parent = ${3:workspace}", "Roblox snippet", "Create a Roblox Instance."),
+            snippet("event connection", "local ${1:connection} = ${2:event}:Connect(function(${3})\n\t$0\nend)", "Roblox snippet", "Connect to an event."),
+            snippet("FindFirstChild", "local ${1:object} = ${2:parent}:FindFirstChild(\"${3:Name}\")\nif not ${1:object} then return end", "Roblox snippet", "Find a child with a guard."),
+            snippet("WaitForChild", "local ${1:object} = ${2:parent}:WaitForChild(\"${3:Name}\")", "Roblox snippet", "Wait for a child."),
+            snippet("GetAttribute", "local ${1:value} = ${2:instance}:GetAttribute(\"${3:Attribute}\")", "Roblox snippet", "Read an attribute."),
+            snippet("SetAttribute", "${1:instance}:SetAttribute(\"${2:Attribute}\", ${3:value})", "Roblox snippet", "Set an attribute."),
+            snippet("Raycast", "local ${1:result} = workspace:Raycast(${2:origin}, ${3:direction}, ${4:params})", "Roblox snippet", "Perform a workspace raycast.")
+          );
+
+          for (const service of ROBLOX_SERVICES) {
+            const variableName = service.charAt(0).toLowerCase() + service.slice(1);
+            suggestions.push(snippet(
+              `GetService: ${service}`,
+              "local ${1:" + variableName + "} = game:GetService(\"" + service + "\")",
+              "Roblox service",
+              `Get Roblox service ${service}.`
+            ));
+          }
+
+          suggestions.push(
+            snippet("class", "class ${1:Name}\n\t$0\nend", "Laua class", "Create a Laua class."),
+            snippet("abstract class", "abstract class ${1:Name}\n\t$0\nend", "Laua class", "Create an abstract Laua class."),
+            snippet("class extends", "class ${1:Name} extends ${2:Base}\n\t$0\nend", "Laua class", "Create a Laua class that inherits from another class."),
+            snippet("constructor", "constructor(${1})\n\t$0\nend", "Laua class member", "Create a class constructor."),
+            snippet("new instance", "new ${1:ClassName}", "Laua expression", "Create a new Laua class instance with no constructor arguments."),
+            snippet("new instance with args", "new ${1:ClassName}(${2})", "Laua expression", "Create a new Laua class instance with constructor arguments."),
+            snippet("public field", "public ${1:Field} = ${2:value}", "Laua class member", "Declare a public class field."),
+            snippet("private field", "private ${1:Field} = ${2:value}", "Laua class member", "Declare a private class field."),
+            snippet("protected field", "protected ${1:Field} = ${2:value}", "Laua class member", "Declare a protected class field."),
+            snippet("static field", "static ${1:Field} = ${2:value}", "Laua class member", "Declare a static class field."),
+            snippet("public function", "public function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Create a public instance method."),
+            snippet("private function", "private function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Create a private instance method."),
+            snippet("protected function", "protected function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Create a protected instance method."),
+            snippet("static function", "static function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Create a static method."),
+            snippet("override function", "override function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Override a method from the parent class."),
+            snippet("abstract function", "abstract function ${1:Name}(${2})\nend", "Laua class member", "Declare an abstract method."),
+            snippet("public override function", "public override function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Create a public override method."),
+            snippet("super constructor", "super(${1})", "Laua inheritance", "Call the parent constructor."),
+            snippet("super method", "super:${1:Method}(${2})", "Laua inheritance", "Call a parent instance method."),
+            snippet("super static", "super.${1:Member}", "Laua inheritance", "Access a member on the parent class."),
+            snippet("namespace", "namespace ${1:Name}\n\t$0\nend", "Laua namespace", "Create a Laua namespace."),
+            snippet("return namespace", "return namespace ${1:Name}\n\t$0\nend", "Laua namespace", "Create and directly return a namespace."),
+            snippet("namespace function", "function ${1:Name}(${2})\n\t$0\nend", "Laua namespace member", "Create an exported namespace function."),
+            snippet("namespace local function", "local function ${1:Name}(${2})\n\t$0\nend", "Laua namespace member", "Create a private helper inside a namespace."),
+            snippet("enum", "enum ${1:Name}\n\t${2:First} = 0\n\t${3:Second} = 1\n\t${4:Third} = 2\nend", "Laua enum", "Create a Laua enum."),
+            snippet("enum auto values", "enum ${1:Name}\n\t${2:First}\n\t${3:Second}\n\t${4:Third}\nend", "Laua enum", "Create a Laua enum with automatic numeric values.")
+          );
+
+          const sourceSymbols = getLauaSymbols(model.getValue());
+
+          for (const [localName, localInfo] of Object.entries(sourceSymbols.locals)) {
+            suggestions.unshift({
+              label: localName,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              insertText: localName,
+              detail: localInfo.detail,
+              sortText: "0000_local_" + localName,
+              range
+            });
+          }
+
+          for (const [functionName, functionInfo] of Object.entries(sourceSymbols.localFunctions)) {
+            suggestions.unshift({
+              label: functionName,
+              kind: monaco.languages.CompletionItemKind.Function,
+              insertText: functionInfo.params
+                ? functionName + "(${1})"
+                : functionName + "()",
+              insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+              detail: functionInfo.detail,
+              documentation: functionInfo.params ? `Parameters: ${functionInfo.params}` : undefined,
+              sortText: "0000_localfn_" + functionName,
+              range
+            });
+          }
+
+          for (const [parameterName, parameterInfo] of Object.entries(sourceSymbols.parameters)) {
+            suggestions.unshift({
+              label: parameterName,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              insertText: parameterName,
+              detail: parameterInfo.detail,
+              sortText: "0000_param_" + parameterName,
+              range
+            });
+          }
+
+          for (const namespaceName of Object.keys(sourceSymbols.namespaces)) {
+            suggestions.unshift({
+              label: namespaceName,
+              kind: monaco.languages.CompletionItemKind.Module,
+              insertText: namespaceName,
+              detail: "Laua namespace",
+              sortText: "0000_" + namespaceName,
+              range
+            });
+          }
+
+          for (const enumName of Object.keys(sourceSymbols.enums)) {
+            suggestions.unshift({
+              label: enumName,
+              kind: monaco.languages.CompletionItemKind.Enum,
+              insertText: enumName,
+              detail: "Laua enum",
+              sortText: "0000_" + enumName,
+              range
+            });
+          }
+
+          for (const className of Object.keys(sourceSymbols.classes)) {
+            suggestions.unshift({
+              label: className,
+              kind: monaco.languages.CompletionItemKind.Class,
+              insertText: className,
+              detail: "Laua class",
+              sortText: "0000_" + className,
+              range
+            });
+
+            if (/\bnew\s+[A-Za-z_][A-Za-z0-9_]*$/.test(lineBefore) || /\bnew\s*$/.test(lineBefore)) {
+              suggestions.unshift({
+                label: `new ${className}`,
+                kind: monaco.languages.CompletionItemKind.Constructor,
+                insertText: className,
+                detail: `Create ${className}`,
+                sortText: "0000_new_" + className,
+                range
+              });
+            }
+          }
+
+          const memberMatch = lineBefore.match(/([A-Za-z_][A-Za-z0-9_]*)\s*([.:])\s*([A-Za-z_][A-Za-z0-9_]*)?$/);
+
+          if (memberMatch) {
+            const owner = memberMatch[1];
+            const operator = memberMatch[2];
+            const cursorOffset = model.getOffsetAt(position);
+            const members = getSymbolMembers(sourceSymbols, owner, operator, cursorOffset);
+
+            if (members) {
+              for (const [memberName, memberInfo] of Object.entries(members)) {
+                const isFunction = memberInfo.kind === "function";
+                const params = memberInfo.params?.trim() || "";
+
+                let insertText = memberName;
+                let insertTextRules;
+
+                if (isFunction) {
+                  insertText = params ? memberName + "(${1})" : memberName + "()";
+                  insertTextRules = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+                }
+
+                suggestions.unshift({
+                  label: memberName,
+                  kind: memberInfo.kind === "enum"
+                    ? monaco.languages.CompletionItemKind.EnumMember
+                    : isFunction
+                      ? monaco.languages.CompletionItemKind.Method
+                      : monaco.languages.CompletionItemKind.Field,
+                  insertText,
+                  insertTextRules,
+                  detail: memberInfo.detail || "Laua member",
+                  documentation: params ? `Parameters: ${params}` : undefined,
+                  sortText: "0000_" + memberName,
+                  range
+                });
+              }
+            }
+          }
+
+          if (/\bnamespace\s+[A-Za-z_][A-Za-z0-9_]*[\s\S]*$/.test(textBefore)) {
+            suggestions.unshift(
+              snippet("namespace function", "function ${1:Name}(${2})\n\t$0\nend", "Laua namespace member", "Export a function from this namespace."),
+              snippet("namespace helper", "local function ${1:Name}(${2})\n\t$0\nend", "Laua namespace member", "Create a local namespace helper.")
+            );
+          }
+
+          if (/\bclass\s+[A-Za-z_][A-Za-z0-9_]*(?:\s+extends\s+[A-Za-z_][A-Za-z0-9_.]*)?[\s\S]*$/.test(textBefore)) {
+            suggestions.unshift(
+              snippet("constructor", "constructor(${1})\n\t$0\nend", "Laua class member", "Create the class constructor."),
+              snippet("public function", "public function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Create a public instance method."),
+              snippet("private field", "private ${1:Field} = ${2:value}", "Laua class member", "Create a private field."),
+              snippet("static function", "static function ${1:Name}(${2})\n\t$0\nend", "Laua class member", "Create a static method.")
+            );
+          }
+
+          return { suggestions };
+        }
+      });
+
+
+      monaco.editor.defineTheme("laua-dark", {
+        base: "vs-dark",
+        inherit: true,
+        rules: [
+          { token: "keyword.laua", foreground: "C084FC", fontStyle: "bold" },
+          { token: "keyword", foreground: "60A5FA" },
+          { token: "type.identifier", foreground: "67E8F9", fontStyle: "bold" },
+          { token: "type", foreground: "67E8F9" },
+          { token: "function", foreground: "FDE68A" },
+          { token: "number", foreground: "FDBA74" },
+          { token: "number.hex", foreground: "FDBA74" },
+          { token: "number.binary", foreground: "FDBA74" },
+          { token: "number.float", foreground: "FDBA74" },
+          { token: "string", foreground: "86EFAC" },
+          { token: "string.escape", foreground: "F9A8D4" },
+          { token: "comment", foreground: "64748B", fontStyle: "italic" },
+          { token: "operator", foreground: "F8FAFC" },
+          { token: "constant.language", foreground: "FB7185" }
+        ],
+        colors: {
+          "editor.background": "#0f1115",
+          "editorLineNumber.foreground": "#475569",
+          "editorLineNumber.activeForeground": "#CBD5E1",
+          "editorCursor.foreground": "#E2E8F0",
+          "editor.selectionBackground": "#33415599",
+          "editor.inactiveSelectionBackground": "#33415555",
+          "editorIndentGuide.background1": "#202633",
+          "editorIndentGuide.activeBackground1": "#475569",
+          "editorBracketHighlight.foreground1": "#60A5FA",
+          "editorBracketHighlight.foreground2": "#C084FC",
+          "editorBracketHighlight.foreground3": "#34D399",
+          "editorBracketHighlight.foreground4": "#FBBF24",
+          "editorBracketHighlight.foreground5": "#FB7185",
+          "editorSuggestWidget.background": "#151922",
+          "editorSuggestWidget.border": "#334155",
+          "editorHoverWidget.background": "#151922",
+          "editorHoverWidget.border": "#334155"
+        }
+      });
+
+      monaco.languages.registerHoverProvider("laua", {
+        provideHover(model, position) {
+          const wordInfo = model.getWordAtPosition(position);
+          if (!wordInfo) return null;
+
+          const word = wordInfo.word;
+          const symbols = getLauaSymbols(model.getValue());
+          const contents = [];
+
+          if (LAUA_DOCS[word]) {
+            contents.push({ value: `**Laua keyword \`${word}\`**` });
+            contents.push({ value: LAUA_DOCS[word] });
+          } else if (symbols.classes[word]) {
+            const info = symbols.classes[word];
+            contents.push({
+              value: `**class \`${word}\`${info.base ? ` extends \`${info.base}\`` : ""}**`
+            });
+
+            const instanceCount = Object.keys(info.instanceMembers).length;
+            const staticCount = Object.keys(info.staticMembers).length;
+            contents.push({ value: `${instanceCount} instance member(s), ${staticCount} static member(s).` });
+          } else if (symbols.namespaces[word]) {
+            const count = Object.keys(symbols.namespaces[word].members).length;
+            contents.push({ value: `**namespace \`${word}\`**` });
+            contents.push({ value: `${count} exported member(s).` });
+          } else if (symbols.enums[word]) {
+            const members = Object.keys(symbols.enums[word].members);
+            contents.push({ value: `**enum \`${word}\`**` });
+            contents.push({ value: members.length ? members.map(x => `\`${x}\``).join(", ") : "No members." });
+          } else if (symbols.locals[word]) {
+            contents.push({ value: `**local \`${word}\`**` });
+            contents.push({ value: symbols.locals[word].detail || "Local variable." });
+          } else if (symbols.localFunctions[word]) {
+            const fn = symbols.localFunctions[word];
+            contents.push({ value: `**function \`${word}(${fn.params || ""})\`**` });
+          } else if (symbols.parameters[word]) {
+            contents.push({ value: `**parameter \`${word}\`**` });
+            contents.push({ value: symbols.parameters[word].detail || "Function parameter." });
+          }
+
+          if (contents.length === 0) return null;
+
+          return {
+            range: new monaco.Range(
+              position.lineNumber,
+              wordInfo.startColumn,
+              position.lineNumber,
+              wordInfo.endColumn
+            ),
+            contents
+          };
+        }
+      });
+
+      monaco.languages.registerDocumentSymbolProvider("laua", {
+        provideDocumentSymbols(model) {
+          const symbols = getLauaSymbols(model.getValue());
+          const result = [];
+
+          const add = (name, kind, start, end, detail = "") => {
+            result.push({
+              name,
+              detail,
+              kind,
+              range: makeRangeFromOffsets(model, start, end),
+              selectionRange: makeRangeFromOffsets(model, start, Math.min(end, start + name.length + 16)),
+              children: []
+            });
+          };
+
+          for (const info of Object.values(symbols.classes)) {
+            add(info.name, monaco.languages.SymbolKind.Class, info.start, info.end, info.base ? `extends ${info.base}` : "");
+          }
+
+          for (const info of Object.values(symbols.namespaces)) {
+            add(info.name, monaco.languages.SymbolKind.Namespace, info.start, info.end);
+          }
+
+          for (const info of Object.values(symbols.enums)) {
+            add(info.name, monaco.languages.SymbolKind.Enum, info.start, info.end);
+          }
+
+          return result;
+        }
+      });
+
+      monaco.languages.registerSignatureHelpProvider("laua", {
+        signatureHelpTriggerCharacters: ["(", ","],
+
+        provideSignatureHelp(model, position) {
+          const line = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+          const match = line.match(/([A-Za-z_][A-Za-z0-9_]*)(?:([.:])([A-Za-z_][A-Za-z0-9_]*))?\s*\(([^()]*)$/);
+          if (!match) return null;
+
+          const symbols = getLauaSymbols(model.getValue());
+          const owner = match[1];
+          const operator = match[2];
+          const member = match[3];
+          const currentArgs = match[4];
+          let fnName = owner;
+          let params = "";
+
+          if (member) {
+            const members = getSymbolMembers(symbols, owner, operator, model.getOffsetAt(position));
+            const info = members?.[member];
+            if (!info || info.kind !== "function") return null;
+
+            fnName = `${owner}${operator}${member}`;
+            params = info.params || "";
+          } else if (symbols.localFunctions[owner]) {
+            params = symbols.localFunctions[owner].params || "";
+          } else {
+            return null;
+          }
+
+          const parameterNames = params
+            ? params.split(",").map(x => x.trim()).filter(Boolean)
+            : [];
+
+          return {
+            value: {
+              signatures: [{
+                label: `${fnName}(${params})`,
+                documentation: "Laua/Luau function",
+                parameters: parameterNames.map(x => ({ label: x }))
+              }],
+              activeSignature: 0,
+              activeParameter: Math.min(
+                currentArgs.trim() === "" ? 0 : currentArgs.split(",").length - 1,
+                Math.max(0, parameterNames.length - 1)
+              )
+            },
+            dispose() {}
+          };
+        }
+      });
+
+      monaco.languages.registerDefinitionProvider("laua", {
+        provideDefinition(model, position) {
+          const wordInfo = model.getWordAtPosition(position);
+          if (!wordInfo) return null;
+
+          const word = wordInfo.word;
+          const symbols = getLauaSymbols(model.getValue());
+          const info = symbols.classes[word] || symbols.namespaces[word] || symbols.enums[word];
+
+          if (!info) return null;
+
+          return {
+            uri: model.uri,
+            range: makeRangeFromOffsets(model, info.start, Math.min(info.end, info.start + word.length + 16))
+          };
+        }
+      });
+
+      const lauaEditor = monaco.editor.create(document.getElementById("lauaEditor"), {
+        value: STARTER,
+        language: "laua",
+        theme: "laua-dark",
+        fontSize: 14,
+        minimap: { enabled: false },
+        automaticLayout: true,
+        tabSize: 4,
+        insertSpaces: true,
+        quickSuggestions: { other: true, comments: false, strings: false },
+        suggestOnTriggerCharacters: true,
+        snippetSuggestions: "top",
+        suggestSelection: "first",
+        wordBasedSuggestions: "currentDocument",
+        parameterHints: { enabled: true, cycle: true },
+        inlineSuggest: { enabled: true },
+        stickyScroll: { enabled: true },
+        bracketPairColorization: { enabled: true, independentColorPoolPerBracketType: true },
+        guides: { bracketPairs: true, bracketPairsHorizontal: true, indentation: true },
+        matchBrackets: "always",
+        folding: true,
+        foldingHighlight: true,
+        showFoldingControls: "mouseover",
+        smoothScrolling: true,
+        cursorSmoothCaretAnimation: "on",
+        cursorBlinking: "smooth",
+        renderWhitespace: "selection",
+        renderControlCharacters: true,
+        linkedEditing: true,
+        padding: { top: 10, bottom: 10 }
+      });
+
+      const luauEditor = monaco.editor.create(document.getElementById("luauEditor"), {
+        value: "",
+        language: "lua",
+        theme: "laua-dark",
+        fontSize: 14,
+        minimap: { enabled: false },
+        automaticLayout: true,
+        readOnly: true
+      });
+
+      const status = document.getElementById("status");
+
+      function runTranspilerSelfTests() {
+        const tests = [
+          {
+            name: "new without args",
+            source: "class myClass\nend\nlocal thing = new myClass",
+            expected: "local thing = myClass.new()"
+          },
+          {
+            name: "new with args",
+            source: "class myClass\n\tconstructor(value)\n\t\tself.Value = value\n\tend\nend\nlocal thing = new myClass(5)",
+            expected: "local thing = myClass.new(5)"
+          },
+          {
+            name: "normal Luau .new",
+            source: "local part = Instance.new(\"Part\")",
+            expected: "Instance.new(\"Part\")"
+          }
+        ];
+
+        for (const test of tests) {
+          const output = transpile(test.source);
+
+          if (!output.includes(test.expected)) {
+            throw new Error(`Self-test failed: ${test.name}`);
+          }
+        }
+
+        return true;
+      }
+
+
+      const diagnosticsTimer = { id: null };
+
+      function refreshEditorIntelligence() {
+        clearTimeout(diagnosticsTimer.id);
+
+        diagnosticsTimer.id = setTimeout(() => {
+          updateLauaDiagnostics(lauaEditor.getModel());
+        }, 120);
+      }
+
+      lauaEditor.onDidChangeModelContent(refreshEditorIntelligence);
+      refreshEditorIntelligence();
+
+
+
+      function runTranspile() {
+        try {
+          const output = transpile(lauaEditor.getValue());
+          luauEditor.setValue(output);
+          status.textContent = "Transpiled successfully.";
+          status.className = "ok";
+        } catch (err) {
+          status.textContent = "Transpile error: " + (err?.message || String(err));
+          status.className = "error";
+        }
+      }
+
+      document.getElementById("transpileBtn").addEventListener("click", runTranspile);
+      document.getElementById("exampleBtn").addEventListener("click", () => {
+        lauaEditor.setValue(STARTER);
+        runTranspile();
+      });
+      document.getElementById("clearBtn").addEventListener("click", () => {
+        lauaEditor.setValue("");
+        luauEditor.setValue("");
+        status.textContent = "Cleared.";
+        status.className = "";
+      });
+
+      lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runTranspile);
+
+      runTranspilerSelfTests();
+      runTranspile();
+    });
+  </script>
+</body>
+</html>
