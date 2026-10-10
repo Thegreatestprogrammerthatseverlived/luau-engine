@@ -9,21 +9,27 @@ Laua currently includes features such as:
 - Classes
 - Constructors
 - Inheritance with `extends`
-- `new`
-- `super`
-- `public`, `private`, and `protected`
+- Object creation with `new`
+- Parent class access with `super`
+- `public`, `private`, and `protected` access modifiers
 - Static members
 - Abstract classes and methods
 - Method overriding
+- `final` classes and methods
 - Namespaces
 - Enums
-- `async`
-- `await`
-- `using`
-- `get`
-- `set`
-- `final`
-- `defer`
+- Asynchronous functions with `async`
+- Asynchronous operations with `await`
+- Automatic resource cleanup with `using`
+- Computed properties with `get` and `set`
+- Deferred cleanup with `defer`
+- Optional chaining with `?.`
+- Nil coalescing with `??`
+- Pattern matching with `match`, `case`, and `default`
+- Table destructuring
+- Module imports with `import`
+- Operator overloading with `operator`
+- Built-in signals with `signal`
 
 Example:
 
@@ -49,3 +55,5 @@ Laua transpiles this syntax into standard Luau, allowing Roblox's existing Luau 
 The goal of Laua is not to replace Luau, but to extend it with useful syntax while keeping normal Luau code familiar and compatible.
 
 Laua is also designed to be usable independently. Projects, frameworks, tools, and game engines can build on top of it without Laua itself being tied to one specific engine.
+
+NOTE FROM DEV: Laua was originally made by me. However, as this project has become bigger and bigger it was just too much for me to handle. The future updates of this project WILL be vibecoded, and remember I'm only doing this for you guys to develop fast, easy, and efficiently. I hope you understand and enjoy laua!
