@@ -6,7 +6,7 @@ It adds higher-level language features while still compiling down to normal Luau
 
 Laua currently includes features such as:
 
-# Classes and object-oriented programming (18)
+### Classes and object-oriented programming (18)
 - `class`
 - `constructor`
 - `extends`
@@ -26,28 +26,28 @@ Laua currently includes features such as:
 - `watch`
 - `signal`
 
-# Code organization (4)
+### Code organization (4)
 - `namespace`
 - `enum`
 - `import`
 - `export`
 
-# Control flow (3)
+### Control flow (3)
 - `match`
 - `case`
 - `default`
 
-# Asynchronous programming and cleanup (4)
+### Asynchronous programming and cleanup (4)
 - `async`
 - `await`
 - `using`
 - `defer`
 
-# Contextual import words
+### Contextual import words
 - `from`
 - `as`
 
-# Additional Laua operators and syntax
+### Additional Laua operators and syntax
 - `?.` — Optional chaining
 - `??` — Nil coalescing
 - `??=` — Nil-coalescing assignment
