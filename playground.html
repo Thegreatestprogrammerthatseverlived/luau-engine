@@ -43,7 +43,7 @@
     dialog::backdrop { background:rgba(0,0,0,.7); }
     #diffResult { max-height:65vh; overflow:auto; background:#0c1018; padding:14px; font-size:12px; white-space:pre; line-height:1.5; }
 
-    /* v3.11 multi-file project workspace */
+    /* v3.13 multi-file project workspace */
     .actions { flex-wrap: wrap; justify-content: flex-end; }
     .file-tabs { display:flex; align-items:center; gap:3px; flex:1; min-width:0; overflow-x:auto; scrollbar-width:thin; }
     .file-tab { white-space:nowrap; display:inline-flex; align-items:center; gap:7px; background:transparent; color:#a6b3c6; border:1px solid transparent; border-bottom:2px solid transparent; border-radius:7px 7px 0 0; padding:7px 9px; font-size:12px; font-weight:500; }
@@ -74,7 +74,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.12 · multi-file · live lint</span>
+      <span>pronounced “Lawah” · v3.13 · multi-file · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn" title="Load the built-in starter example into main.laua (other files stay unchanged)">Default main.laua</button>
@@ -117,7 +117,7 @@
     </section>
   </main>
 
-  <div id="status">Ready.</div>
+  <div id="status" role="status" aria-live="polite">Loading Laua Playground...</div>
   <dialog id="diffDialog" aria-label="Generated output differences">
     <div style="display:flex;gap:14px;align-items:center;justify-content:space-between">
       <strong>Generated Luau changes</strong>
@@ -126,8 +126,43 @@
     <pre id="diffResult"></pre>
   </dialog>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js"></script>
   <script>
+    // The editor must not silently show an empty screen when a CDN is blocked.
+    (function loadLauaMonacoLoader() {
+      const urls = [
+        "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs/loader.min.js",
+        "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.min.js",
+        "https://unpkg.com/monaco-editor@0.52.2/min/vs/loader.min.js"
+      ];
+      const status = document.getElementById("status");
+      function load(index) {
+        if (index >= urls.length) {
+          status.textContent = "Could not load the code editor. Check your internet connection and refresh the page.";
+          status.className = "error";
+          return;
+        }
+        const loader = document.createElement("script");
+        loader.src = urls[index];
+        loader.onload = () => {
+          if (typeof window.require === "function" && typeof window.require.config === "function") {
+            window.__lauaMonacoAssetsUrl = urls[index].replace(/\/loader\.min\.js$/, "");
+            window.dispatchEvent(new Event("laua-monaco-loader-ready"));
+          } else {
+            loader.remove();
+            load(index + 1);
+          }
+        };
+        loader.onerror = () => {
+          loader.remove();
+          load(index + 1);
+        };
+        document.head.appendChild(loader);
+      }
+      load(0);
+    })();
+  </script>
+  <script>
+    function initializeLauaPlayground() {
     const LAUA_KEYWORDS = [
       "class", "extends", "constructor", "private", "public", "protected",
       "static", "new", "namespace", "super", "abstract", "override", "enum",
@@ -4513,7 +4548,7 @@ local part = message[1:7]`;
     ensureRobloxApiLoaded();
 
     require.config({
-      paths: { vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs" }
+      paths: { vs: (typeof window !== "undefined" && window.__lauaMonacoAssetsUrl) || "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs" }
     });
 
     require(["vs/editor/editor.main"], function () {
@@ -5516,9 +5551,12 @@ local part = message[1:7]`;
       // One Monaco model per project file: the editor, lint, cursor and undo
       // history are independent even though the transpiler remains single-file.
       const projectFiles = new Map();
+      // Keep the existing key to preserve v3.10-v3.12 user projects.
       const PROJECT_KEY = "laua-playground-project-v3.10";
+      const RECOVERY_KEY = "laua-playground-startup-recovery-v3.13";
       let activeFile = null;
       let projectReady = false;
+      let playgroundInitialized = false;
       const projectTabBar = document.getElementById("fileTabs");
       const projectStatus = () => document.getElementById("status");
       const modeSelection = () => document.getElementById("modeSelect").value;
@@ -5684,23 +5722,43 @@ local part = message[1:7]`;
 
       function restoredProject() {
         try {
-          const saved=JSON.parse(localStorage.getItem(PROJECT_KEY) || "null");
+          const rawSaved=localStorage.getItem(PROJECT_KEY);
+          const saved=JSON.parse(rawSaved || "null");
           if (!saved || !Array.isArray(saved.files) || !saved.files.length || saved.files.length > 100) return null;
           const seen=new Set(), safe=[];
-          let migratedMain = false;
           for (const entry of saved.files) {
+            if (!entry || typeof entry.name !== "string" || typeof entry.source !== "string") return null;
             const name=normalizeProjectFilename(entry.name);
-            if (seen.has(name) || typeof entry.source!=="string") return null;
-            // Only migrate the exact unchanged v3.10 demo. Never replace real edits.
-            const isUntouchedOldMain = name === "main.laua" && entry.source === PREVIOUS_MAIN_STARTER;
-            const source = isUntouchedOldMain ? STARTER : entry.source;
-            if (isUntouchedOldMain) migratedMain = true;
-            seen.add(name);safe.push({name,source});
+            if (seen.has(name)) return null;
+            seen.add(name);
+            // The old demo or a blank main file should never result in an empty
+            // startup editor. Keep an exact recovery copy of the old project.
+            const oldDemo = name === "main.laua" && entry.source === PREVIOUS_MAIN_STARTER;
+            const blankMain = name === "main.laua" && entry.source.trim() === "";
+            if (blankMain || oldDemo) {
+              try {
+                if (!localStorage.getItem(RECOVERY_KEY)) {
+                  localStorage.setItem(RECOVERY_KEY, JSON.stringify(saved));
+                }
+              } catch {}
+            }
+            safe.push({name,source:(blankMain || oldDemo) ? STARTER : entry.source});
           }
-          // Show the migrated starter immediately, even if another tab was active.
-          const active = migratedMain ? "main.laua" : seen.has(saved.active) ? saved.active : safe[0].name;
-          return {files:safe,active};
-        } catch { return null; }
+          // A deleted main.laua must not make the next visit open Zombie.laua.
+          if (!seen.has("main.laua")) {
+            safe.unshift({name:"main.laua",source:STARTER});
+          }
+          // A tab selected last visit should NOT decide what opens next visit.
+          // Its source is kept intact and the user can select the tab again.
+          return {files:safe,active:"main.laua"};
+        } catch (error) {
+          try {
+            const original=localStorage.getItem(PROJECT_KEY);
+            if (original && !localStorage.getItem(RECOVERY_KEY)) localStorage.setItem(RECOVERY_KEY, original);
+          } catch {}
+          console.warn("Saved Laua project could not be restored:", error);
+          return null;
+        }
       }
 
       function createProjectFile(name,source="", options={}) {
@@ -5744,6 +5802,9 @@ local part = message[1:7]`;
         renderProjectTabs();
         refreshEditorIntelligence();
         rememberProject();
+        // Each tab has an independent output model; populate it when the
+        // user switches tabs instead of leaving the right-hand pane blank.
+        if (playgroundInitialized) runTranspile();
       }
 
       function renderProjectTabs() {
@@ -6109,9 +6170,10 @@ local part = message[1:7]`;
           return output;
         } catch (err) {
           // Never let Copy use stale code from an earlier successful transpilation.
-          luauEditor.setValue("");
+          const failureMessage = err?.message || String(err);
+          luauEditor.setValue("-- Transpilation failed. Fix the error in the Laua editor.\n-- " + String(failureMessage).replaceAll("\n", "\n-- "));
           if (activeFile) projectFiles.get(activeFile).generated=null;
-          status.textContent = "Transpile error: " + (err?.message || String(err));
+          status.textContent = "Transpile error: " + failureMessage;
           status.className = "error";
           return null;
         }
@@ -6323,24 +6385,44 @@ local part = message[1:7]`;
       lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runTranspile);
       lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyL, () => runLint(true));
 
-      // Restore locally saved tabs (browser-local) or create a three-file starter project.
-      const savedProject=restoredProject();
-      const seed=savedProject?.files || [
-        {name:"main.laua",source:STARTER},
-        {name:"Zombie.laua",source:'export class Zombie\n    Health = 100\nend'.replaceAll("\\n", "\n")},
-        {name:"Player.laua",source:'export class Player\n    Name = "Guest"\nend'.replaceAll("\\n", "\n")}
-      ];
+      // Always launch with main.laua selected and populated. Other saved
+      // .laua files remain available as tabs, including Zombie.laua.
+      const savedProject = restoredProject();
+      const seed = savedProject?.files || [{name:"main.laua",source:STARTER}];
       for (const entry of seed) createProjectFile(entry.name,entry.source,{silent:true});
-      projectReady=true;
-      switchProjectFile(savedProject?.active || "main.laua");
+      projectReady = true;
+      switchProjectFile("main.laua");
 
-
-      runTranspilerSelfTests();
-      runTranspile();
-      if (savedProject && projectFiles.get("main.laua")?.model.getValue() !== STARTER) {
-        status.textContent += " · Saved project restored; click Default main.laua to load the starter.";
+      // A failed background self-test should never prevent the starter editor
+      // from appearing. The Tests button can still report full test failures.
+      let startupTestError = null;
+      try { runTranspilerSelfTests(); }
+      catch (error) {
+        startupTestError = error;
+        console.error("Laua compiler self-test failed:", error);
       }
+      runTranspile();
+      if (startupTestError) {
+        status.textContent += " · Compiler self-tests reported a problem; open Tests for details.";
+        status.className = "error";
+      }
+      playgroundInitialized = true;
+      if (savedProject && projectFiles.get("main.laua")?.model.getValue() !== STARTER) {
+        status.textContent += " · Your saved main.laua was restored unchanged.";
+      }
+    }, function (error) {
+      const status = document.getElementById("status");
+      status.textContent = "Could not initialize the code editor. Refresh this page or check your connection.";
+      status.className = "error";
+      console.error("Laua Monaco initialization error", error);
     });
+    }
+
+    if (typeof require === "function" && typeof require.config === "function") {
+      initializeLauaPlayground();
+    } else {
+      window.addEventListener("laua-monaco-loader-ready", initializeLauaPlayground, { once: true });
+    }
   </script>
 </body>
 </html>
