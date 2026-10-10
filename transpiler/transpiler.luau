@@ -1,4 +1,4 @@
-local Transpiler = {Version = "3.9"}
+local Transpiler = {Version = "3.14"}
 
 -- Embedded runtime sources. Generated scripts are self-contained and never require LauaAsync/LauaCore/LauaSignal.
 
@@ -1891,18 +1891,59 @@ local function transpileAwaits(source: string): (string, number)
     return source, #occurrences
 end
 
--- Insert each required runtime exactly once, AFTER any --! header directives.
--- All three runtime implementations live inside this ModuleScript, so the generated
--- Luau has no dependency on sibling Laua runtime ModuleScripts.
+-- Only embed LauaCore functions that the generated source actually calls.
+-- Keep the original helper implementations intact to preserve their behavior.
+local function compactCoreRuntime(source: string): string
+    local masked = maskNonCode(source)
+    if masked:find("__lauaCore%s*%[") then return LAUA_CORE_RUNTIME_SOURCE end
+
+    local requested = {}
+    for name in masked:gmatch("__lauaCore%.([%a_][%w_%.]*)") do
+        requested[name] = true
+    end
+
+    local declarations = {}
+    local available = {}
+    for start, name in LAUA_CORE_RUNTIME_SOURCE:gmatch("()function LauaCore%.([%a_][%w_%.]*)%(") do
+        table.insert(declarations, {Start = start, Name = name})
+        available[name] = true
+    end
+    for name in requested do
+        if not available[name] then return LAUA_CORE_RUNTIME_SOURCE end
+    end
+
+    local pieces = {"local LauaCore = {}"}
+    local usesTable = false
+    for name in requested do
+        if name:sub(1, 6) == "table." then usesTable = true end
+    end
+    if usesTable then table.insert(pieces, "LauaCore.table = {}") end
+
+    for index, declaration in declarations do
+        if not requested[declaration.Name] then continue end
+        local nextDeclaration = declarations[index + 1]
+        local last = nextDeclaration and nextDeclaration.Start - 1 or #LAUA_CORE_RUNTIME_SOURCE
+        local body = LAUA_CORE_RUNTIME_SOURCE:sub(declaration.Start, last)
+        body = body:gsub("\nLauaCore%.table%s*=%s*%{%}", "")
+        body = body:gsub("\nreturn LauaCore%s*$", "")
+        table.insert(pieces, trim(body))
+    end
+    table.insert(pieces, "return LauaCore")
+    return table.concat(pieces, "\n\n")
+end
+
+-- Embedded runtimes are inserted once, after header directives. Generated
+-- scripts do not depend on separate Laua runtime ModuleScripts.
 local function insertEmbeddedRuntimes(source: string): string
+    local masked = maskNonCode(source)
     local fragments = {}
-    if source:find("__lauaAsync.", 1, true) then
+    if masked:find("__lauaAsync.", 1, true) then
         table.insert(fragments, "local __lauaAsync = (function()\n" .. LAUA_ASYNC_RUNTIME_SOURCE .. "\nend)()")
     end
-    if source:find("__lauaCore.", 1, true) then
-        table.insert(fragments, "local __lauaCore = (function()\n" .. LAUA_CORE_RUNTIME_SOURCE .. "\nend)()")
+    if masked:find("__lauaCore.", 1, true) then
+        table.insert(fragments, "local __lauaCore = (function()\n" .. compactCoreRuntime(source) .. "\nend)()")
     end
-    if source:find("__lauaSignal.", 1, true) then
+    if masked:find("__lauaSignal.", 1, true) then
         table.insert(fragments, "local __lauaSignal = (function()\n" .. LAUA_SIGNAL_RUNTIME_SOURCE .. "\nend)()")
     end
     if #fragments == 0 then return source end
