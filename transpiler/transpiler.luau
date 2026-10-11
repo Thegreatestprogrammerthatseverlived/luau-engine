@@ -1,4 +1,4 @@
-local Transpiler = {Version = "3.14"}
+local Transpiler = {Version = "3.19"}
 
 -- Embedded runtime sources. Generated scripts are self-contained and never require LauaAsync/LauaCore/LauaSignal.
 
@@ -336,6 +336,7 @@ local function trim(value: string): string
 end
 
 local function maskNonCode(source: string): string
+    if not source:find('"', 1, true) and not source:find("'", 1, true) and not source:find("`", 1, true) and not source:find("[", 1, true) and not source:find("--", 1, true) then return source end
     local output = table.create(#source)
     local position = 1
     local quote = nil
@@ -372,7 +373,7 @@ local function maskNonCode(source: string): string
                 position += 1
             end
         elseif pair == "--" then
-            local equals = source:sub(position):match("^%-%-%[(=*)%[")
+            local equals = source:sub(position + 2, position + 2) == "[" and source:sub(position + 3):match("^(=*)%[") or nil
             if equals then
                 local opening = 4 + #equals
                 for _ = 1, opening do table.insert(output, " ") end
@@ -389,7 +390,7 @@ local function maskNonCode(source: string): string
             table.insert(output, " ")
             position += 1
         elseif char == "[" then
-            local equals = source:sub(position):match("^%[(=*)%[")
+            local equals = (nextChar == "[" or nextChar == "=") and source:sub(position + 1):match("^(=*)%[") or nil
             if equals then
                 local opening = 2 + #equals
                 for _ = 1, opening do table.insert(output, " ") end
@@ -411,15 +412,15 @@ end
 local function splitLines(source: string)
     local lines = {}
     local start = 1
-
-    for index = 1, #source + 1 do
-        if index > #source or source:sub(index, index) == "\n" then
-            table.insert(lines, {Start = start, Finish = index - 1, Text = source:sub(start, index - 1)})
-            start = index + 1
+    while true do
+        local ending = source:find("\n", start, true)
+        if not ending then
+            table.insert(lines, {Start = start, Finish = #source, Text = source:sub(start)})
+            return lines
         end
+        table.insert(lines, {Start = start, Finish = ending - 1, Text = source:sub(start, ending - 1)})
+        start = ending + 1
     end
-
-    return lines
 end
 
 local function blockStart(line: string): boolean
@@ -446,7 +447,7 @@ local function blockStart(line: string): boolean
 end
 
 local function findBlock(source: string, startIndex: number)
-    local lines = splitLines(source)
+    local lines = splitLines(maskNonCode(source))
     local lineIndex = nil
 
     for index, line in lines do
@@ -459,7 +460,7 @@ local function findBlock(source: string, startIndex: number)
 
     local depth = 0
     for index = lineIndex, #lines do
-        local line = trim(maskNonCode(lines[index].Text))
+        local line = trim(lines[index].Text)
         if blockStart(line) then depth += 1 end
         if line:match("^end%s*;?%s*$") or line:match("^until%s+") then
             depth -= 1
@@ -832,6 +833,44 @@ local function transpileClasses(source: string): string
         if base then ctorBody = replaceSuper(ctorBody, base) end
         if not base and maskNonCode(ctorBody):find("super%s*[:%.%(%[]") then error("super requires a parent class") end
 
+        -- A plain class does not need getter, setter, watcher, or lazy-property hooks.
+        -- Keep __init so later subclasses can safely call the parent initializer.
+        local plainClass = not base and prefix == "" and #getters == 0 and #setters == 0 and next(lazies) == nil and next(watchers) == nil
+        if plainClass then
+            for _, method in methods do
+                if method.Abstract or method.Final or method.Override then plainClass = false; break end
+            end
+        end
+        if plainClass then
+            local simple = {"local " .. name .. " = {}", name .. ".__index = " .. name}
+            for _, field in statics do table.insert(simple, `{name}.{field.Name} = {transpileSource(field.Value)}`) end
+            table.insert(simple, `function {name}.__init(self{ctor and trim(ctor.Params) ~= "" and ", " .. ctor.Params or ""})`)
+            for _, field in fields do table.insert(simple, `    self.{field.Name} = {transpileSource(field.Value)}`) end
+            for _, item in signals do table.insert(simple, `    self.{item.Name} = __lauaSignal.new({item.Types or ""})`) end
+            local simpleCtor = normalized(transpileSource(ctorBody), "    ")
+            if simpleCtor ~= "" then table.insert(simple, simpleCtor) end
+            table.insert(simple, "end")
+            table.insert(simple, `function {name}.new(...)`)
+            table.insert(simple, "    local self = setmetatable({}, " .. name .. ")")
+            table.insert(simple, `    {name}.__init(self, ...)`)
+            table.insert(simple, "    return self")
+            table.insert(simple, "end")
+            for _, operator in operators do
+                table.insert(simple, `function {name}.{operator.Name}(self{trim(operator.Params) ~= "" and ", " .. operator.Params or ""})`)
+                local code = normalized(transpileSource(operator.Body), "    ")
+                if code ~= "" then table.insert(simple, code) end
+                table.insert(simple, "end")
+            end
+            for _, method in methods do
+                local code = normalized(transpileSource(method.Body), "    ")
+                table.insert(simple, `{method.Attributes ~= "" and method.Attributes .. "\n" or ""}{method.Kind == "async function" and "async " or ""}function {name}{method.Static and "." or ":"}{method.Name}({method.Params})`)
+                if code ~= "" then table.insert(simple, code) end
+                table.insert(simple, "end")
+            end
+            source = source:sub(1, declarationStart - 1) .. table.concat(simple, "\n") .. source:sub(closing.Finish + 1)
+            continue
+        end
+
         local generated = {"local " .. name .. " = {}"}
         if base then
             table.insert(generated, `if {base}.__final then error("Cannot extend final class '{base}'") end`)
@@ -993,10 +1032,10 @@ local function transpileNamespaces(source: string): string
 end
 
 transpileSource = function(source: string): string
-    source = transpileEnums(source)
-    source = transpileNamespaces(source)
-    source = transpileClasses(source)
-    source = transpileNew(source)
+    if source:find("enum", 1, true) then source = transpileEnums(source) end
+    if source:find("namespace", 1, true) then source = transpileNamespaces(source) end
+    if source:find("class", 1, true) then source = transpileClasses(source) end
+    if source:find("new", 1, true) then source = transpileNew(source) end
     return source
 end
 
@@ -1295,8 +1334,12 @@ end
 
 local function transpileOptional(source: string): (string, boolean)
     local changed = false
+    local masked = maskNonCode(source)
+    local function rewrite(first: number, last: number, replacement: string)
+        source = replaceRange(source, first, last, replacement)
+        masked = replaceRange(masked, first, last, maskNonCode(replacement))
+    end
     while true do
-        local masked = maskNonCode(source)
         local pos = masked:find("?.", 1, true)
         if not pos then return source, changed end
         local left = expressionLeft(masked, pos - 1)
@@ -1312,7 +1355,7 @@ local function transpileOptional(source: string): (string, boolean)
             if not closing then error("Unclosed optional function call") end
             local receiver = trim(source:sub(left,pos-1))
             local args = source:sub(pos+3,closing-1)
-            source = replaceRange(source,left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) return __lauaReceiver(" .. args .. ") end)")
+            rewrite(left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) return __lauaReceiver(" .. args .. ") end)")
             changed = true
             continue
         end
@@ -1327,7 +1370,7 @@ local function transpileOptional(source: string): (string, boolean)
             local key = trim(source:sub(pos+3,closing-1))
             if key == "" then error("Optional index requires a key") end
             local receiver = trim(source:sub(left,pos-1))
-            source = replaceRange(source,left,closing,'__lauaCore.optionalIndex(' .. receiver .. ', function() return ' .. key .. ' end)')
+            rewrite(left,closing,'__lauaCore.optionalIndex(' .. receiver .. ', function() return ' .. key .. ' end)')
             changed = true
             continue
         end
@@ -1349,14 +1392,14 @@ local function transpileOptional(source: string): (string, boolean)
             local args = source:sub(openAt+1,closing-1)
             local invocation = "__lauaMethod(" .. (colon and ("__lauaReceiver" .. (trim(args) ~= "" and ", " or "")) or "") .. args .. ")"
             local lookup = "local __lauaMethod = __lauaCore.optional(__lauaReceiver, \"" .. member .. "\"); if __lauaMethod == nil then return nil end; "
-            source = replaceRange(source,left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) " .. lookup .. "return " .. invocation .. " end)")
+            rewrite(left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) " .. lookup .. "return " .. invocation .. " end)")
             changed = true
             continue
         end
         if colon then error("Optional colon access requires a method call") end
         local base = trim(source:sub(left, pos - 1))
         local replacement = `__lauaCore.optional({base}, "{member}")`
-        source = replaceRange(source, left, pos + 1 + #member, replacement)
+        rewrite( left, pos + 1 + #member, replacement)
         changed = true
     end
 end
@@ -2077,31 +2120,44 @@ function Transpiler.Transpile(source: string, options: any?): string
     assert(type(source) == "string", "Expected Laua source string")
     local mode = type(options) == "table" and options.Mode or "Development"
     if mode ~= "Development" and mode ~= "Release" and mode ~= "Debug" then error("Invalid Laua compile mode") end
-    source = preprocessMode(source, mode)
+    local style = type(options) == "table" and options.OutputStyle or "Readable"
+    if style ~= "Readable" and style ~= "Compact" then error("Invalid Laua output style") end
+
+    -- Earlier passes may introduce syntax for later passes. Inspect current text.
+    if source:find("--#", 1, true) then source = preprocessMode(source, mode) end
     validateKnownVisibility(source)
     validatePendingFeatures(source)
-    source = transpilePipelines(source)
-    source = transpileMemo(source)
-    source = transpileIsOperator(source)
-    source = transpileAdditionalSyntax(source)
-    local withoutExports, exportedNames = transpileExports(source)
-    local output = transpileDefers(transpileExtensions(transpileSource(transpileUsing(transpileCoalescingAssign(withoutExports)))))
-    local asyncCount
-    output, asyncCount = transpileAsyncFunctions(output)
-    local awaitCount
-    output, awaitCount = transpileAwaits(output)
+    if source:find("|>", 1, true) then source = transpilePipelines(source) end
+    if source:find("memo", 1, true) then source = transpileMemo(source) end
+    if source:find("%f[%w]is%f[%W]") then source = transpileIsOperator(source) end
+    if source:find("=>", 1, true) or source:find("...", 1, true) or source:find("[", 1, true) or source:find("table.", 1, true) or source:find("import", 1, true) or source:find("@nolint", 1, true) then
+        source = transpileAdditionalSyntax(source)
+    end
+    local exportedNames = {}
+    if source:find("export", 1, true) then source, exportedNames = transpileExports(source) end
+    if source:find("??=", 1, true) then source = transpileCoalescingAssign(source) end
+    if source:find("using", 1, true) then source = transpileUsing(source) end
+    source = transpileSource(source)
+    if source:find("import", 1, true) then source = transpileImports(source) end
+    if source:find("local", 1, true) and source:find("{", 1, true) then source = transpileDestructuring(source) end
+    if source:find("match", 1, true) then source = transpileMatches(source) end
+    if source:find("?.", 1, true) then source = (transpileOptional(source)) end
+    if source:find("??", 1, true) then source = (transpileCoalescing(source)) end
+    if source:find("defer", 1, true) then source = transpileDefers(source) end
+    local asyncCount = 0
+    if source:find("async", 1, true) then source, asyncCount = transpileAsyncFunctions(source) end
+    local awaitCount = 0
+    if source:find("await", 1, true) then source, awaitCount = transpileAwaits(source) end
     if awaitCount > 0 and asyncCount == 0 then error("await requires an async function") end
-    output = transpileParameterDefaults(output)
-    output = insertEmbeddedRuntimes(output)
+    if source:find("function", 1, true) and source:find("=", 1, true) then source = transpileParameterDefaults(source) end
+    if source:find("__laua", 1, true) then source = insertEmbeddedRuntimes(source) end
     if #exportedNames > 0 then
         local values = {}
         for _, name in exportedNames do table.insert(values, `{name} = {name}`) end
-        output ..= "\nreturn {" .. table.concat(values, ", ") .. "}"
+        source ..= "\nreturn {" .. table.concat(values, ", ") .. "}"
     end
-    output = (output:gsub("[ \t]+\n", "\n"))
-    local style = type(options) == "table" and options.OutputStyle or "Readable"
-    if style ~= "Readable" and style ~= "Compact" then error("Invalid Laua output style") end
-    return style == "Compact" and compactGeneratedOutput(output) or output
+    source = source:gsub("[ \t]+\n", "\n")
+    return style == "Compact" and compactGeneratedOutput(source) or source
 end
 
 return Transpiler
