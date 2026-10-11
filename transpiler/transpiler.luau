@@ -1,4 +1,4 @@
-local Transpiler = {Version = "3.19"}
+local Transpiler = {Version = "3.22"}
 
 -- Embedded runtime sources. Generated scripts are self-contained and never require LauaAsync/LauaCore/LauaSignal.
 
@@ -201,10 +201,9 @@ function LauaCore.memo(callback: (...any) -> ...any): (...any) -> ...any
     local nilKey = {}
     local terminal = {}
     return function(...)
-        local args = table.pack(...)
         local node = root
-        for index = 1, args.n do
-            local key = args[index]
+        for index = 1, select("#", ...) do
+            local key = select(index, ...)
             if key == nil then key = nilKey end
             local nextNode = node[key]
             if not nextNode then nextNode = {}; node[key] = nextNode end
@@ -212,7 +211,7 @@ function LauaCore.memo(callback: (...any) -> ...any): (...any) -> ...any
         end
         local cached = node[terminal]
         if not cached then
-            cached = table.pack(callback(table.unpack(args, 1, args.n)))
+            cached = table.pack(callback(...))
             node[terminal] = cached
         end
         return table.unpack(cached, 1, cached.n)
@@ -346,62 +345,61 @@ local function maskNonCode(source: string): string
     while position <= #source do
         local char = source:sub(position, position)
         local nextChar = source:sub(position + 1, position + 1)
-        local pair = char .. nextChar
 
         if longClose then
             local closing = source:sub(position, position + #longClose - 1) == longClose
             if closing then
-                for _ = 1, #longClose do table.insert(output, " ") end
+                for _ = 1, #longClose do output[#output + 1] = " " end
                 position += #longClose
                 longClose = nil
             else
-                table.insert(output, char == "\n" and "\n" or " ")
+                output[#output + 1] = char == "\n" and "\n" or " "
                 position += 1
             end
         elseif lineComment then
-            table.insert(output, char == "\n" and "\n" or " ")
+            output[#output + 1] = char == "\n" and "\n" or " "
             if char == "\n" then lineComment = false end
             position += 1
         elseif quote then
             if char == "\\" and position < #source then
-                table.insert(output, " ")
-                table.insert(output, " ")
+                output[#output + 1] = " "
+                output[#output + 1] = " "
                 position += 2
             else
-                table.insert(output, char == "\n" and "\n" or " ")
+                output[#output + 1] = char == "\n" and "\n" or " "
                 if char == quote then quote = nil end
                 position += 1
             end
-        elseif pair == "--" then
+        elseif char == "-" and nextChar == "-" then
             local equals = source:sub(position + 2, position + 2) == "[" and source:sub(position + 3):match("^(=*)%[") or nil
             if equals then
                 local opening = 4 + #equals
-                for _ = 1, opening do table.insert(output, " ") end
+                for _ = 1, opening do output[#output + 1] = " " end
                 position += opening
                 longClose = "]" .. equals .. "]"
             else
-                table.insert(output, " ")
-                table.insert(output, " ")
+                output[#output + 1] = " "
+                output[#output + 1] = " "
                 lineComment = true
                 position += 2
             end
         elseif char == '"' or char == "'" or char == "`" then
             quote = char
-            table.insert(output, " ")
+            output[#output + 1] = " "
             position += 1
         elseif char == "[" then
             local equals = (nextChar == "[" or nextChar == "=") and source:sub(position + 1):match("^(=*)%[") or nil
             if equals then
                 local opening = 2 + #equals
-                for _ = 1, opening do table.insert(output, " ") end
+                for _ = 1, opening do output[#output + 1] = " " end
                 position += opening
                 longClose = "]" .. equals .. "]"
             else
-                table.insert(output, char)
+                output[#output + 1] = char
                 position += 1
             end
         else
-            table.insert(output, char)
+            output[#output + 1] = char
             position += 1
         end
     end
@@ -446,13 +444,19 @@ local function blockStart(line: string): boolean
     return false
 end
 
-local function findBlock(source: string, startIndex: number)
-    local lines = splitLines(maskNonCode(source))
+local function findBlock(source: string, startIndex: number, precomputedLines: any?)
+    local lines = precomputedLines or splitLines(maskNonCode(source))
     local lineIndex = nil
-
-    for index, line in lines do
-        if startIndex >= line.Start and startIndex <= line.Finish then
-            lineIndex = index
+    local low, high = 1, #lines
+    while low <= high do
+        local middle = math.floor((low + high) / 2)
+        local line = lines[middle]
+        if startIndex < line.Start then
+            high = middle - 1
+        elseif startIndex > line.Finish then
+            low = middle + 1
+        else
+            lineIndex = middle
             break
         end
     end
@@ -460,20 +464,25 @@ local function findBlock(source: string, startIndex: number)
 
     local depth = 0
     for index = lineIndex, #lines do
-        local line = trim(lines[index].Text)
-        if blockStart(line) then depth += 1 end
-        if line:match("^end%s*;?%s*$") or line:match("^until%s+") then
+        local line = lines[index]
+        if line.BlockOpen == nil then
+            local code = trim(line.Text)
+            line.BlockOpen = blockStart(code)
+            line.BlockClose = code:match("^end%s*;?%s*$") ~= nil or code:match("^until%s+") ~= nil
+        end
+        if line.BlockOpen then depth += 1 end
+        if line.BlockClose then
             depth -= 1
-            if depth == 0 then return lines[index] end
+            if depth == 0 then return line end
         end
     end
 
     error("Missing 'end' in Laua source")
 end
 
-local function findKeyword(source: string, keyword: string): number?
-    local masked = maskNonCode(source)
-    local start = 1
+local function findKeyword(source: string, keyword: string, precomputedMask: string?, startAt: number?): number?
+    local masked = precomputedMask or maskNonCode(source)
+    local start = startAt or 1
 
     while true do
         local first, last = masked:find(keyword, start, true)
@@ -514,20 +523,25 @@ end
 local transpileSource
 
 local function transpileNew(source: string): string
+    local masked = maskNonCode(source)
+    local output = {}
+    local cursor, last = 1, 1
     while true do
-        local start = findKeyword(source, "new")
-        if not start then return source end
+        local start = findKeyword(source, "new", masked, cursor)
+        if not start then break end
         local rest = source:sub(start + 3)
         local whitespace, className = rest:match("^(%s+)([%a_][%w_%.]*)")
         if not className then error("Expected class name after 'new'") end
         local after = start + 3 + #whitespace + #className
         local suffix = source:sub(after)
-        if suffix:match("^%s*%(") then
-            source = source:sub(1, start - 1) .. className .. ".new" .. suffix
-        else
-            source = source:sub(1, start - 1) .. className .. ".new()" .. suffix
-        end
+        table.insert(output, source:sub(last, start - 1))
+        table.insert(output, className)
+        table.insert(output, suffix:match("^%s*%(") and ".new" or ".new()")
+        last, cursor = after, after
     end
+    if #output == 0 then return source end
+    table.insert(output, source:sub(last))
+    return table.concat(output)
 end
 
 local function transpileEnums(source: string): string
@@ -637,6 +651,9 @@ local function replaceSuper(source: string, base: string): string
     return source
 end
 
+local LAUA_OPERATOR_MAP = { ["+"] = "__add", ["-"] = "__sub", ["*"] = "__mul", ["/"] = "__div", ["//"] = "__idiv", ["%"] = "__mod", ["^"] = "__pow", [".."] = "__concat", ["=="] = "__eq", ["<"] = "__lt", ["<="] = "__le", ["#"] = "__len" }
+local LAUA_METHOD_KINDS = {"async function", "function", "get", "set"}
+
 local function transpileClasses(source: string): string
     while true do
         local start = findKeyword(source, "class")
@@ -654,6 +671,7 @@ local function transpileClasses(source: string): string
         local closing = findBlock(source, start)
         local body = source:sub(headerEnd + 1, closing.Start - 1)
         local lines = splitLines(body)
+        local blockLines = splitLines(maskNonCode(body))
         local fields, statics, methods, getters, setters, operators, signals, lazies, watchers = {}, {}, {}, {}, {}, {}, {}, {}, {}
         local attributes = {}
         local names = {}
@@ -675,21 +693,20 @@ local function transpileClasses(source: string): string
             local modifiers, remainder = parseModifiers(headerText)
             local kind, memberName, params = nil, nil, nil
             if not kind then
-                for _, possible in {"async function", "function", "get", "set"} do
+                for _, possible in LAUA_METHOD_KINDS do
                     memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*$")
                     if memberName then kind = possible; break end
                 end
             end
             if not kind then
-                for _, possible in {"async function", "function", "get", "set"} do
+                for _, possible in LAUA_METHOD_KINDS do
                     memberName, params = remainder:match("^" .. possible .. "%s+([%a_][%w_]*)%s*%(([^)]*)%)%s*:%s*.+$")
                     if memberName then kind = possible; break end
                 end
             end
             local operatorSymbol, operatorParams = remainder:match("^operator%s+([^%s%(]+)%s*%(([^)]*)%)%s*$")
             if operatorSymbol then
-                local operatorMap = { ["+"] = "__add", ["-"] = "__sub", ["*"] = "__mul", ["/"] = "__div", ["//"] = "__idiv", ["%"] = "__mod", ["^"] = "__pow", [".."] = "__concat", ["=="] = "__eq", ["<"] = "__lt", ["<="] = "__le", ["#"] = "__len" }
-                local metamethod = operatorMap[operatorSymbol]
+                local metamethod = LAUA_OPERATOR_MAP[operatorSymbol]
                 if not metamethod then error(`Unsupported operator '{operatorSymbol}'`) end
                 if operatorSymbol == "-" and trim(operatorParams) == "" then metamethod = "__unm" end
                 if (metamethod == "__unm" or metamethod == "__len") and trim(operatorParams) ~= "" then error(`Unary operator '{operatorSymbol}' takes no arguments`) end
@@ -698,7 +715,7 @@ local function transpileClasses(source: string): string
                 if next(modifiers) then error("Operators cannot have modifiers") end
                 names[metamethod] = true
                 local operatorAt = row.Start + (row.Text:find("operator", 1, true) or 1) - 1
-                local operatorEnd = findBlock(body, operatorAt)
+                local operatorEnd = findBlock(body, operatorAt, blockLines)
                 local operatorHeaderEnd = body:find("\n", operatorAt, true)
                 local operatorBody = operatorHeaderEnd and body:sub(operatorHeaderEnd + 1, operatorEnd.Start - 1) or ""
                 table.insert(operators, {Name = metamethod, Params = operatorParams, Body = operatorBody})
@@ -716,7 +733,7 @@ local function transpileClasses(source: string): string
                 local oldParam, newParam = watchParams:match("^%s*([%a_][%w_]*)%s*,%s*([%a_][%w_]*)%s*$")
                 if not oldParam or not newParam or oldParam == newParam then error("watch requires two distinct parameters: oldValue, newValue") end
                 local at = row.Start + (row.Text:find("watch", 1, true) or 1) - 1
-                local done = findBlock(body, at)
+                local done = findBlock(body, at, blockLines)
                 local nextLine = body:find("\n", at, true)
                 watchers[watchName] = {Params = watchParams, Body = nextLine and body:sub(nextLine + 1, done.Start - 1) or ""}
                 local nextIndex = nil
@@ -756,7 +773,7 @@ local function transpileClasses(source: string): string
             local ctorParams = remainder:match("^constructor%s*%(([^)]*)%)%s*$")
             if kind or ctorParams then
                 local kindStart = row.Start + (row.Text:find(kind or "constructor", 1, true) or 1) - 1
-                local ending = findBlock(body, kindStart)
+                local ending = findBlock(body, kindStart, blockLines)
                 local nextLine = body:find("\n", kindStart, true)
                 local memberBody = nextLine and body:sub(nextLine + 1, ending.Start - 1) or ""
                 local member = {Name = memberName, Kind = kind or "constructor", Params = params or ctorParams,
@@ -946,7 +963,10 @@ local function transpileClasses(source: string): string
         table.insert(generated, "end")
         table.insert(generated, `function {name}.new(...)`)
         table.insert(generated, `    if {name}.__abstract then error("Cannot instantiate abstract class '{name}'") end`)
-        table.insert(generated, "    local self = setmetatable({__lauaValues = {}, __lauaInitialized = {}}, " .. name .. ")")
+        local instanceSlots = {}
+        if base or next(watchers) ~= nil or next(lazies) ~= nil then table.insert(instanceSlots, "__lauaValues = {}") end
+        if base or next(lazies) ~= nil then table.insert(instanceSlots, "__lauaInitialized = {}") end
+        table.insert(generated, "    local self = setmetatable({" .. table.concat(instanceSlots, ", ") .. "}, " .. name .. ")")
         table.insert(generated, `    {name}.__init(self, ...)`)
         table.insert(generated, "    return self")
         table.insert(generated, "end")
@@ -1049,6 +1069,10 @@ local function transpileExports(source: string): (string, {string})
     local rows = {}
     for _, row in splitLines(source) do
         local raw = row.Text
+        if not raw:find("export", 1, true) then
+            table.insert(rows, raw)
+            continue
+        end
         local masked = trim(maskNonCode(raw))
         if not masked:match("^export%s+") or masked:match("^export%s+type%s+") then
             table.insert(rows, raw)
@@ -1075,7 +1099,7 @@ local function transpileImports(source: string): string
     for _, row in splitLines(source) do
         local raw = row.Text
         local line = trim(raw)
-        if not trim(maskNonCode(raw)):match("^import%f[%W]") then
+        if not raw:find("import", 1, true) or not trim(maskNonCode(raw)):match("^import%f[%W]") then
             table.insert(result, raw)
             continue
         end
@@ -1195,6 +1219,7 @@ end
 
 local function transpileMatches(source: string): string
     local serial = 0
+    local lookupDefinitions = {}
     while true do
         local masked = maskNonCode(source)
         local start = nil
@@ -1207,7 +1232,19 @@ local function transpileMatches(source: string): string
             if trim(masked:sub(lineStart, position - 1)) == "" then start = position end
             from = position + 5
         end
-        if not start then return source end
+        if not start then
+            if #lookupDefinitions == 0 then return source end
+            -- Keep leading Luau --! directives before generated declarations.
+            local prefixEnd = 0
+            local cursor = 1
+            while true do
+                local lineEnd = source:find("\n", cursor, true)
+                if not lineEnd or not source:sub(cursor, lineEnd - 1):match("^%s*%-%-!") then break end
+                prefixEnd = lineEnd
+                cursor = lineEnd + 1
+            end
+            return source:sub(1, prefixEnd) .. table.concat(lookupDefinitions, "\n") .. "\n" .. source:sub(prefixEnd + 1)
+        end
         local headerEnd = source:find("\n", start, true)
         if not headerEnd then error("match needs case branches") end
         local expression = trim(source:sub(start + 5, headerEnd - 1))
@@ -1236,6 +1273,45 @@ local function transpileMatches(source: string): string
             if code:match("^end%s*;?%s*$") or code:match("^until%s+") then depth -= 1 end
         end
         if #branches == 0 then error("match requires at least one case") end
+        -- Literal-only match branches that return constants can be dispatched
+        -- through a module-level lookup table, avoiding an elseif chain.
+        local lookupEntries = {}
+        local seenKeys = {}
+        local lookupDefault = nil
+        local canLookup = #branches >= 3 and branches[#branches].Default
+        if canLookup then
+            for _, branch in branches do
+                local value = trim(table.concat(branch.Lines, "\n")):match("^return%s+(.+)$")
+                if not value or not (value:match("^%-?%d+%.?%d*$") or value == "true" or value == "false" or value == "nil" or value:match('^"[^"\\\n]*"$') or value:match("^'[^'\\\n]*'$") ) then
+                    canLookup = false
+                    break
+                end
+                if branch.Default then
+                    lookupDefault = value
+                else
+                    local key = trim(branch.Value):match('^"([%w_]+)"$') or trim(branch.Value):match("^'([%w_]+)'$")
+                    if not key or seenKeys[key] or value == "nil" then
+                        canLookup = false
+                        break
+                    end
+                    seenKeys[key] = true
+                    table.insert(lookupEntries, `["{key}"] = {value}`)
+                end
+            end
+        end
+        if canLookup then
+            serial += 1
+            local tableName = `__lauaStaticMatch{serial}`
+            while source:find(tableName, 1, true) do
+                serial += 1
+                tableName = `__lauaStaticMatch{serial}`
+            end
+            table.insert(lookupDefinitions, "local " .. tableName .. " = {" .. table.concat(lookupEntries, ", ") .. "}")
+            local keyName, resultName = tableName .. "_key", tableName .. "_result"
+            local lines = {"do", `    local {keyName} = {expression}`, `    local {resultName} = {tableName}[{keyName}]`, `    if {resultName} ~= nil then return {resultName} end`, `    return {lookupDefault}`, "end"}
+            source = replaceRange(source, start, closing.Finish, table.concat(lines, "\n"))
+            continue
+        end
         serial += 1
         local variable = `__lauaMatch{serial}`
         local generated = {"do", `    local {variable} = {expression}`}
@@ -1333,6 +1409,23 @@ local function expressionRight(source: string, startAt: number): number?
 end
 
 local function transpileOptional(source: string): (string, boolean)
+    if source:find("\n", 1, true) and source:find("?.", 1, true) and not source:find("??", 1, true) and not source:find("--", 1, true) and not source:find("[\"'`]", 1) and not source:find("\r", 1, true) then
+        local lines = splitLines(source)
+        local eligible = true
+        for _, line in lines do
+            if line.Text:find("?.", 1, true) and not line.Text:match("^[ \t]*local%s+[%a_][%w_]*%s*=%s*[%a_][%w_]*%?%.[%a_][%w_]*[ \t]*$") then
+                eligible = false
+                break
+            end
+        end
+        if eligible then
+            local output = {}
+            for _, line in lines do
+                table.insert(output, line.Text:find("?.", 1, true) and (transpileOptional(line.Text)) or line.Text)
+            end
+            return table.concat(output, "\n"), true
+        end
+    end
     local changed = false
     local masked = maskNonCode(source)
     local function rewrite(first: number, last: number, replacement: string)
@@ -1442,9 +1535,26 @@ local function transpileCoalescingAssign(source: string): string
 end
 
 local function transpileCoalescing(source: string): (string, boolean)
+    if source:find("\n", 1, true) and source:find("??", 1, true) and not source:find("--", 1, true) and not source:find("[\"'`]", 1) and not source:find("\r", 1, true) then
+        local lines = splitLines(source)
+        local eligible = true
+        for _, line in lines do
+            if line.Text:find("??", 1, true) and not line.Text:match("^[ \t]*local%s+[%a_][%w_]*%s*=%s*[%a_][%w_]*%s*%?%?%s*[%a_][%w_]*[ \t]*$") then
+                eligible = false
+                break
+            end
+        end
+        if eligible then
+            local output = {}
+            for _, line in lines do
+                table.insert(output, line.Text:find("??", 1, true) and (transpileCoalescing(line.Text)) or line.Text)
+            end
+            return table.concat(output, "\n"), true
+        end
+    end
     local changed = false
+    local masked = maskNonCode(source)
     while true do
-        local masked = maskNonCode(source)
         local pos = nil
         local cursor = 1
         while true do
@@ -1469,6 +1579,7 @@ local function transpileCoalescing(source: string): (string, boolean)
         local b = trim(source:sub(pos + 2, right))
         local replacement = `__lauaCore.coalesce({a}, function() return {b} end)`
         source = replaceRange(source, left, right, replacement)
+        masked = replaceRange(masked, left, right, maskNonCode(replacement))
         changed = true
     end
 end
@@ -1499,7 +1610,9 @@ end
 local function transpilePipelines(source: string): string
     local result = {}
     for _, line in splitLines(source) do
-        local raw, masked = line.Text, maskNonCode(line.Text)
+        local raw = line.Text
+        if not raw:find('|>', 1, true) then table.insert(result, raw); continue end
+        local masked = maskNonCode(raw)
         if not masked:find('|>', 1, true) then table.insert(result, raw); continue end
         local separators = {}
         local cursor = 1
@@ -1564,6 +1677,10 @@ local function transpileParameterDefaults(source: string): string
     local rows = {}
     for _, row in splitLines(source) do
         local raw = row.Text
+        if not raw:find("function", 1, true) or not raw:find("=", 1, true) then
+            table.insert(rows, raw)
+            continue
+        end
         local masked = maskNonCode(raw)
         local openAt = masked:find('%f[%w]function%f[%W]')
         if openAt then
@@ -1630,10 +1747,7 @@ end
 
 -- Laua: source-level sugar. Only fully supported forms are lowered.
 -- Keep unsupported proposals from leaking malformed syntax into generated Luau.
-local function validatePendingFeatures(source: string)
-    for _, row in splitLines(source) do
-        local line = trim(maskNonCode(row.Text))
-        local reasons = {
+local LAUA_PENDING_REASONS = {
             {"^[%a_][%w_]*:%s*(for|while|repeat)%s", "Labeled loop exits"},
             {"^break%s+[%a_][%w_]*$", "Labeled break"},
             {"^continue%s+[%a_][%w_]*$", "Labeled continue"},
@@ -1641,7 +1755,14 @@ local function validatePendingFeatures(source: string)
             {"^type%s+[%a_][%w_]*%s*=%s*%[", "Typed positional tables"},
             {"^type%s+[%a_][%w_]*%s*=%s*truthy%s*$", "Truthy type aliases"},
             {"^type%s+[%a_][%w_]*%s*=%s*falsy%s*$", "Falsy type aliases"},
-        }
+}
+
+local function validatePendingFeatures(source: string)
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        if not (raw:find("for", 1, true) or raw:find("while", 1, true) or raw:find("repeat", 1, true) or raw:find("break", 1, true) or raw:find("continue", 1, true) or raw:find("unique", 1, true) or raw:find("type", 1, true) or raw:find("regex.", 1, true) or (raw:find("function", 1, true) and raw:find("<", 1, true))) then continue end
+        local line = trim(maskNonCode(raw))
+        local reasons = LAUA_PENDING_REASONS
         for _, entry in reasons do
             -- Plain pattern alternatives are handled explicitly below.
             if entry[2] ~= "Labeled loop exits" and line:match(entry[1]) then
@@ -1665,6 +1786,10 @@ local function transpileAdditionalSyntax(source: string): string
     local sequence = 0
     for _, row in splitLines(source) do
         local original = row.Text
+        if not original:find("=>", 1, true) and not original:find("...", 1, true) and not original:find("[", 1, true) and not original:find("table.", 1, true) and not original:find("import", 1, true) and not original:find("@nolint", 1, true) then
+            table.insert(rows, original)
+            continue
+        end
         local stripped = trim(original)
         local masked = trim(maskNonCode(original))
         local indent = original:match("^[ \t]*") or ""
@@ -1689,7 +1814,7 @@ local function transpileAdditionalSyntax(source: string): string
         end
 
         -- The v22 spread form accepts spreads-only table literals on the RHS.
-        if trim(maskNonCode(original)):find("%.%.%.[%a_]") and original:find("{", 1, true) then
+        if masked:find("%.%.%.[%a_]") and original:find("{", 1, true) then
             local prefix, values = original:match("^(.-)%{%s*(%.%.%.[^{}]-)%s*%}%s*$")
             if prefix and values then
                 local parts = {}
@@ -1711,6 +1836,7 @@ local function transpileAdditionalSyntax(source: string): string
 
         -- Methods in the core runtime rather than mutating the built-in table library.
         for _, method in {"filter", "map", "reduce", "findWhere"} do
+            if not original:find("table." .. method, 1, true) then continue end
             local maskedOriginal = maskNonCode(original)
             local search = 1
             while true do
@@ -1964,6 +2090,9 @@ end
 
 -- Only embed LauaCore functions that the generated source actually calls.
 -- Keep the original helper implementations intact to preserve their behavior.
+local CORE_RUNTIME_DECLARATIONS: {{Start: number, Name: string}}? = nil
+local CORE_RUNTIME_AVAILABLE: {[string]: boolean}? = nil
+
 local function compactCoreRuntime(source: string): string
     local masked = maskNonCode(source)
     if masked:find("__lauaCore%s*%[") then return LAUA_CORE_RUNTIME_SOURCE end
@@ -1973,12 +2102,18 @@ local function compactCoreRuntime(source: string): string
         requested[name] = true
     end
 
-    local declarations = {}
-    local available = {}
-    for start, name in LAUA_CORE_RUNTIME_SOURCE:gmatch("()function LauaCore%.([%a_][%w_%.]*)%(") do
-        table.insert(declarations, {Start = start, Name = name})
-        available[name] = true
+    if not CORE_RUNTIME_DECLARATIONS then
+        local declarations = {}
+        local available = {}
+        for start, name in LAUA_CORE_RUNTIME_SOURCE:gmatch("()function LauaCore%.([%a_][%w_%.]*)%(") do
+            table.insert(declarations, {Start = start, Name = name})
+            available[name] = true
+        end
+        CORE_RUNTIME_DECLARATIONS = declarations
+        CORE_RUNTIME_AVAILABLE = available
     end
+    local declarations = CORE_RUNTIME_DECLARATIONS :: {{Start: number, Name: string}}
+    local available = CORE_RUNTIME_AVAILABLE :: {[string]: boolean}
     for name in requested do
         if not available[name] then return LAUA_CORE_RUNTIME_SOURCE end
     end
@@ -2036,6 +2171,7 @@ end
 local function validateKnownVisibility(source: string)
     if not source:find("private",1,true) and not source:find("protected",1,true) then return end
     local masked = maskNonCode(source)
+    local blockLines = splitLines(masked)
     local classes = {}
     for start, name, base in masked:gmatch("()class%s+([%a_][%w_]*)%s+extends%s+([%a_][%w_]*)") do
         classes[name] = {Base = base, Start = start, Finish = #source, Members = {}}
@@ -2044,7 +2180,7 @@ local function validateKnownVisibility(source: string)
         if not classes[name] then classes[name] = {Start = start, Finish = #source, Members = {}} end
     end
     for name, info in classes do
-        local ok, block = pcall(findBlock, source, info.Start)
+        local ok, block = pcall(findBlock, source, info.Start, blockLines)
         if not ok or not block then continue end
         info.Finish = block.Finish
         local headerEnd = source:find("\n", info.Start, true)
@@ -2116,6 +2252,120 @@ local function compactGeneratedOutput(source: string): string
     return table.concat(result,"\n")
 end
 
+-- Compile-time inlining is explicit. Preserve ordinary dynamic function calls.
+-- Only a single pure return with zero/one argument can be substituted safely.
+local function transpileInlineFunctions(source: string): string
+    if source:find("%[%=*%[") or source:find("`", 1, true) then return source end
+    local cursor = 1
+    while true do
+        local masked = maskNonCode(source)
+        local start = masked:find("inline", cursor, true)
+        if not start then return source end
+        local lineStart = (source:sub(1, start - 1):match(".*()\n") or 0) + 1
+        if trim(source:sub(lineStart, start - 1)) ~= "" or masked:sub(start - 1, start - 1):match("[%w_%.:]") or masked:sub(start + 6, start + 6):match("[%w_]") then
+            cursor = start + 6
+            continue
+        end
+        local headerEnd = source:find("\n", start, true)
+        if not headerEnd then error("inline function needs a body") end
+        local header = source:sub(start, headerEnd - 1)
+        local name, parameters = header:match("^inline%s+function%s+([%a_][%w_]*)%s*%((.-)%)%s*$")
+        if not name or (parameters ~= "" and not parameters:match("^[%a_][%w_]*$")) then
+            error("inline supports top-level functions with zero or one untyped parameter")
+        end
+        local adjusted = source:sub(1, start - 1) .. header:gsub("^inline%s+", "", 1) .. source:sub(headerEnd)
+        local adjustedHeaderEnd = adjusted:find("\n", start, true)
+        local closing = findBlock(adjusted, start)
+        local body = trim(adjusted:sub(adjustedHeaderEnd + 1, closing.Start - 1))
+        local operator, number = nil, nil
+        if parameters ~= "" then operator, number = body:match("^return%s+" .. parameters .. "%s*([+*/%-])%s*(%-?%d+%.?%d*)%s*$") end
+        local identity = parameters ~= "" and body == "return " .. parameters
+        local constant = parameters == "" and (body:match("^return%s+%-?%d+%.?%d*$") or body:match("^return%s+true$") or body:match("^return%s+false$") or body:match("^return%s+nil$") or body:match('^return%s+"[^"\\\n]*"$') or body:match("^return%s+'[^'\\\n]*'$") ) ~= nil
+        if not operator and not identity and not constant then
+            error("inline function '" .. name .. "' must return a literal, its parameter, or parameter arithmetic with a number")
+        end
+        local suffix = adjusted:sub(closing.Finish + 1)
+        local suffixMasked = maskNonCode(suffix)
+        -- Fall back to regular calls when a later binding might replace the function.
+        if suffixMasked:find("%f[%w]" .. name .. "%s*=") or suffixMasked:find("%f[%w]local%s+" .. name .. "%f[%W]") or suffixMasked:find("%f[%w]function%s+" .. name .. "%s*%(") then
+            source = adjusted
+            cursor = closing.Finish + 1
+            continue
+        end
+        local offset = 1
+        while true do
+            local code = maskNonCode(suffix)
+            local found = code:find(name, offset, true)
+            if not found then break end
+            local before = code:sub(found - 1, found - 1)
+            local after = code:sub(found + #name, found + #name)
+            if before:match("[%w_%.:]") or after:match("[%w_]") then offset = found + #name; continue end
+            local opening = code:find("%S", found + #name)
+            if not opening or code:sub(opening, opening) ~= "(" then offset = found + #name; continue end
+            local depth, closingCall = 0, nil
+            for pos = opening, #code do
+                local char = code:sub(pos, pos)
+                if char == "(" then depth += 1 end
+                if char == ")" then
+                    depth -= 1
+                    if depth == 0 then closingCall = pos; break end
+                end
+            end
+            if not closingCall then error("Unclosed inline call to " .. name) end
+            local argument = trim(suffix:sub(opening + 1, closingCall - 1))
+            local simple = argument:match("^[%a_][%w_%.]*$") or argument:match("^%-?%d+%.?%d*$") or argument:match("^[%a_][%w_]*%(%s*%)$")
+            if (parameters ~= "" and not simple) or (parameters == "" and argument ~= "") then
+                offset = closingCall + 1
+                continue
+            end
+            local replacement
+            if constant then replacement = "(" .. trim(body:sub(7)) .. ")"
+            elseif identity then replacement = "(" .. argument .. ")"
+            else replacement = "((" .. argument .. ") " .. operator .. " " .. number .. ")" end
+            suffix = suffix:sub(1, found - 1) .. replacement .. suffix:sub(closingCall + 1)
+            offset = found + #replacement
+        end
+        source = adjusted:sub(1, closing.Finish) .. suffix
+        cursor = closing.Finish + 1
+    end
+end
+
+-- A postfix ? on a single-variable declaration returns on nil, but not false.
+-- Only the guarded declaration form is recognized; optional type annotations
+-- and non-declaration expressions keep their existing meaning.
+local function transpileEarlyReturn(source: string): string
+    local lines = {}
+    for _, row in splitLines(source) do
+        local raw = row.Text
+        if not raw:find("?", 1, true) then
+            table.insert(lines, raw)
+            continue
+        end
+        local masked = trim(maskNonCode(raw))
+        if masked:sub(-1) ~= "?" or masked:sub(-2) == "??" then
+            table.insert(lines, raw)
+            continue
+        end
+        local indent, name, annotation, expression
+        for _, keyword in {"local", "const"} do
+            -- Capture all fields from the declaration; do not confuse `?` in
+            -- optional type annotations with the postfix nil guard.
+            indent, name, annotation, expression = raw:match("^([ \t]*)" .. keyword .. "%s+([%a_][%w_]*)(.-)%s*=%s*(.-)%?%s*$")
+            if name then
+                if annotation == "" or annotation:match("^%s*:%s*[^=]+$") then break end
+                name = nil
+            end
+        end
+        if not name or trim(expression) == "" or trim(expression):sub(-1) == "?" then
+            table.insert(lines, raw)
+            continue
+        end
+        table.insert(lines, indent .. "local " .. name .. annotation .. " = " .. trim(expression))
+        table.insert(lines, indent .. "if " .. name .. " == nil then return end")
+    end
+    return table.concat(lines, "\n")
+end
+
 function Transpiler.Transpile(source: string, options: any?): string
     assert(type(source) == "string", "Expected Laua source string")
     local mode = type(options) == "table" and options.Mode or "Development"
@@ -2125,6 +2375,7 @@ function Transpiler.Transpile(source: string, options: any?): string
 
     -- Earlier passes may introduce syntax for later passes. Inspect current text.
     if source:find("--#", 1, true) then source = preprocessMode(source, mode) end
+    if source:find("inline", 1, true) then source = transpileInlineFunctions(source) end
     validateKnownVisibility(source)
     validatePendingFeatures(source)
     if source:find("|>", 1, true) then source = transpilePipelines(source) end
@@ -2143,6 +2394,7 @@ function Transpiler.Transpile(source: string, options: any?): string
     if source:find("match", 1, true) then source = transpileMatches(source) end
     if source:find("?.", 1, true) then source = (transpileOptional(source)) end
     if source:find("??", 1, true) then source = (transpileCoalescing(source)) end
+    if source:find("?", 1, true) then source = transpileEarlyReturn(source) end
     if source:find("defer", 1, true) then source = transpileDefers(source) end
     local asyncCount = 0
     if source:find("async", 1, true) then source, asyncCount = transpileAsyncFunctions(source) end
