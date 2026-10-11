@@ -108,6 +108,12 @@ local LauaCore = {}
 
 function LauaCore.optional(value: any, key: any): any
     if value == nil then return nil end
+    if typeof(value) == "Instance" then
+        local ok, result = pcall(function() return value[key] end)
+        if ok then return result end
+        if typeof(key) == "string" then return value:FindFirstChild(key) end
+        return nil
+    end
     return value[key]
 end
 
@@ -179,7 +185,14 @@ end
 
 function LauaCore.optionalIndex(value: any, key: () -> any): any
     if value == nil then return nil end
-    return value[key()]
+    local index = key()
+    if typeof(value) == "Instance" then
+        local ok, result = pcall(function() return value[index] end)
+        if ok then return result end
+        if typeof(index) == "string" then return value:FindFirstChild(index) end
+        return nil
+    end
+    return value[index]
 end
 
 -- Cache complete result tuples, including nils; cache keys use argument identity.
@@ -1289,6 +1302,20 @@ local function transpileOptional(source: string): (string, boolean)
         local left = expressionLeft(masked, pos - 1)
         local member = masked:sub(pos + 2):match("^([%a_][%w_]*)")
         if not left then error("Optional chaining requires a receiver") end
+        if masked:sub(pos+2,pos+2) == "(" then
+            local depth, closing = 1, nil
+            for i = pos+3, #masked do
+                local char = masked:sub(i,i)
+                if char == "(" then depth += 1 elseif char == ")" then depth -= 1 end
+                if depth == 0 then closing = i; break end
+            end
+            if not closing then error("Unclosed optional function call") end
+            local receiver = trim(source:sub(left,pos-1))
+            local args = source:sub(pos+3,closing-1)
+            source = replaceRange(source,left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) return __lauaReceiver(" .. args .. ") end)")
+            changed = true
+            continue
+        end
         if masked:sub(pos+2,pos+2) == "[" then
             local depth, closing = 1, nil
             for i = pos+3, #masked do
@@ -1320,8 +1347,9 @@ local function transpileOptional(source: string): (string, boolean)
             if not closing then error("Unclosed optional method call") end
             local receiver = trim(source:sub(left,pos-1))
             local args = source:sub(openAt+1,closing-1)
-            local invocation = colon and ("__lauaReceiver:" .. member) or ("__lauaReceiver." .. member)
-            source = replaceRange(source,left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) return " .. invocation .. "(" .. args .. ") end)")
+            local invocation = "__lauaMethod(" .. (colon and ("__lauaReceiver" .. (trim(args) ~= "" and ", " or "")) or "") .. args .. ")"
+            local lookup = "local __lauaMethod = __lauaCore.optional(__lauaReceiver, \"" .. member .. "\"); if __lauaMethod == nil then return nil end; "
+            source = replaceRange(source,left,closing,"__lauaCore.optionalCall(" .. receiver .. ", function(__lauaReceiver) " .. lookup .. "return " .. invocation .. " end)")
             changed = true
             continue
         end
@@ -1962,11 +1990,95 @@ local function insertEmbeddedRuntimes(source: string): string
     return source:sub(1, at - 1) .. table.concat(fragments, "\n\n") .. "\n\n" .. source:sub(at)
 end
 
+local function validateKnownVisibility(source: string)
+    if not source:find("private",1,true) and not source:find("protected",1,true) then return end
+    local masked = maskNonCode(source)
+    local classes = {}
+    for start, name, base in masked:gmatch("()class%s+([%a_][%w_]*)%s+extends%s+([%a_][%w_]*)") do
+        classes[name] = {Base = base, Start = start, Finish = #source, Members = {}}
+    end
+    for start, name in masked:gmatch("()class%s+([%a_][%w_]*)") do
+        if not classes[name] then classes[name] = {Start = start, Finish = #source, Members = {}} end
+    end
+    for name, info in classes do
+        local ok, block = pcall(findBlock, source, info.Start)
+        if not ok or not block then continue end
+        info.Finish = block.Finish
+        local headerEnd = source:find("\n", info.Start, true)
+        if not headerEnd then continue end
+        local body = maskNonCode(source:sub(headerEnd + 1, block.Start - 1))
+        for line in body:gmatch("[^\n]+") do
+            local kind, field = line:match("^%s*(private)%s+([%a_][%w_]*)")
+            if not kind then kind, field = line:match("^%s*(protected)%s+([%a_][%w_]*)") end
+            if not kind then
+                kind, field = line:match("^%s*(private)%s+function%s+([%a_][%w_]*)")
+                if not kind then kind, field = line:match("^%s*(protected)%s+function%s+([%a_][%w_]*)") end
+            end
+            if kind and field then
+                if field == "function" then
+                    local actual = line:match("^%s*" .. kind .. "%s+function%s+([%a_][%w_]*)")
+                    if actual then field = actual end
+                end
+                info.Members[field] = kind
+            end
+        end
+    end
+    local variables = {}
+    for variable, class in masked:gmatch("local%s+([%a_][%w_]*)%s*=%s*new%s+([%a_][%w_]*)") do
+        if classes[class] then variables[variable] = class end
+    end
+    for variable, class in masked:gmatch("local%s+([%a_][%w_]*)%s*:%s*([%a_][%w_]*)") do
+        if classes[class] and not variables[variable] then variables[variable] = class end
+    end
+    for start, owner, member in masked:gmatch("()([%a_][%w_]*)%s*[%.:]%s*([%a_][%w_]*)") do
+        local class = variables[owner]
+        if not class then continue end
+        local seen = {}
+        local defining, access = nil, nil
+        while class and classes[class] and not seen[class] do
+            seen[class] = true
+            access = classes[class].Members[member]
+            if access then defining = class; break end
+            class = classes[class].Base
+        end
+        if not access then continue end
+        local ownerClass = nil
+        for candidate, info in classes do
+            if start > info.Start and start < info.Finish then ownerClass = candidate; break end
+        end
+        local allowed = ownerClass == defining
+        if ownerClass and not allowed and access == "protected" then
+            local parent, visited = ownerClass, {}
+            while parent and classes[parent] and not visited[parent] do
+                if parent == defining then allowed = true; break end
+                visited[parent] = true
+                parent = classes[parent].Base
+            end
+        end
+        if not allowed then
+            local prefix = source:sub(1,start - 1)
+            local _, lineCount = prefix:gsub("\n", "")
+            error(`Cannot access {access} member '{defining}.{member}' (line {lineCount + 1}).`)
+        end
+    end
+end
+
+local function compactGeneratedOutput(source: string): string
+    if source:find("%[%=*%[") or source:find("`",1,true) then return source end
+    local result = {}
+    for row in source:gmatch("([^\n]*)\n?") do
+        local commentOnly = row:match("^%s*%-%-") and not row:match("^%s*%-%-[!#]")
+        if row ~= "" and row:match("%S") and not commentOnly then table.insert(result,row) end
+    end
+    return table.concat(result,"\n")
+end
+
 function Transpiler.Transpile(source: string, options: any?): string
     assert(type(source) == "string", "Expected Laua source string")
     local mode = type(options) == "table" and options.Mode or "Development"
     if mode ~= "Development" and mode ~= "Release" and mode ~= "Debug" then error("Invalid Laua compile mode") end
     source = preprocessMode(source, mode)
+    validateKnownVisibility(source)
     validatePendingFeatures(source)
     source = transpilePipelines(source)
     source = transpileMemo(source)
@@ -1986,7 +2098,10 @@ function Transpiler.Transpile(source: string, options: any?): string
         for _, name in exportedNames do table.insert(values, `{name} = {name}`) end
         output ..= "\nreturn {" .. table.concat(values, ", ") .. "}"
     end
-    return (output:gsub("[ \t]+\n", "\n"))
+    output = (output:gsub("[ \t]+\n", "\n"))
+    local style = type(options) == "table" and options.OutputStyle or "Readable"
+    if style ~= "Readable" and style ~= "Compact" then error("Invalid Laua output style") end
+    return style == "Compact" and compactGeneratedOutput(output) or output
 end
 
 return Transpiler
