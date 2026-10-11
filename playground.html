@@ -75,7 +75,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.19 · multi-file · optimized output · live lint</span>
+      <span>pronounced “Lawah” · v3.22 · multi-file · optimized output · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn" title="Load the built-in starter example into main.laua (other files stay unchanged)">Default main.laua</button>
@@ -100,7 +100,7 @@
       <button id="diffBtn" title="Compare the last two successful manual transpiles (including different files)">Output Diff</button>
       <button id="docsBtn" title="Generate reference documentation from Laua declarations">Docs</button>
       <button id="exportBtn" title="Export active file as Luau">Export Luau</button>
-      <button id="exportProjectBtn" title="Export every Laua source, generated Luau, and source mappings">Export Project ZIP</button>
+      <button id="exportProjectBtn" title="Export compiled ModuleScripts, original Laua sources and limited line maps for Roblox Studio">Export Project .rbxmx</button>
       <button id="importProjectBtn" title="Restore all Laua files from an exported ZIP">Import Project ZIP</button>
       <input id="importProjectInput" type="file" accept=".zip,application/zip" hidden />
       <button id="nextErrorBtn" title="Jump to the next error or warning (F8)">Next Problem</button>
@@ -180,7 +180,7 @@
       "static", "new", "namespace", "super", "abstract", "override", "enum",
       "final", "get", "set", "defer", "using", "async", "await",
       "match", "case", "default", "import", "from", "operator", "signal",
-      "lazy", "watch", "export", "as", "memo", "is"
+      "lazy", "watch", "export", "as", "memo", "is", "inline", "const"
     ];
 
     const LUAU_ATTRIBUTES = [
@@ -378,8 +378,7 @@ local part = message[1:7]`;
 
       while (i < source.length) {
         const one = source[i];
-        const two = source.slice(i, i + 2);
-        const four = source.slice(i, i + 4);
+        const two = source[i + 1];
 
         if (quote) {
           if (one === "\\") {
@@ -405,7 +404,7 @@ local part = message[1:7]`;
         }
 
         if (blockComment) {
-          if (two === "]]") {
+          if (one === "]" && two === "]") {
             out[i] = " ";
             if (i + 1 < out.length) out[i + 1] = " ";
             blockComment = false;
@@ -417,19 +416,19 @@ local part = message[1:7]`;
           continue;
         }
 
-        if (four === "--[[") {
+        if (one === "-" && two === "-" && source[i + 2] === "[" && source[i + 3] === "[") {
           for (let j = 0; j < 4; j++) if (i + j < out.length) out[i + j] = " ";
           blockComment = true;
           i += 4;
           continue;
         }
 
-        if (two === "--" && preserveDirectives && source[i + 2] === "!") {
+        if (one === "-" && two === "-" && preserveDirectives && source[i + 2] === "!") {
           while (i < source.length && source[i] !== "\n") i++;
           continue;
         }
 
-        if (two === "--") {
+        if (one === "-" && two === "-") {
           out[i] = " ";
           if (i + 1 < out.length) out[i + 1] = " ";
           lineComment = true;
@@ -472,8 +471,8 @@ local part = message[1:7]`;
       return -1;
     }
 
-    function findMatchingParen(source, openIndex) {
-      const masked = maskNonCode(source);
+    function findMatchingParen(source, openIndex, masked = null) {
+      masked = masked || maskNonCode(source);
       let depth = 0;
       for (let i = openIndex; i < source.length; i++) {
         if (masked[i] === "(") depth++;
@@ -499,46 +498,59 @@ local part = message[1:7]`;
       }
     }
 
-    function findMatchingEndByLines(source, startIndex) {
-      const lines = splitLinesWithOffsets(source);
-      const masked = maskNonCode(source);
-      const startLine = lines.findIndex(line => startIndex >= line.start && startIndex <= line.end);
+    function lineIndexAfter(lines, offset) {
+      let lo = 0, hi = lines.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (lines[mid].start <= offset) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo < lines.length ? lo : -1;
+    }
+
+    function findMatchingEndByLines(source, startIndex, precomputed = null) {
+      const lines = precomputed ? precomputed.lines : splitLinesWithOffsets(source);
+      const masked = precomputed ? precomputed.masked : maskNonCode(source);
+      let low = 0, high = lines.length - 1, startLine = -1;
+      while (low <= high) {
+        const mid = (low + high) >>> 1;
+        if (startIndex < lines[mid].start) high = mid - 1;
+        else if (startIndex > lines[mid].end) low = mid + 1;
+        else { startLine = mid; break; }
+      }
       let depth = 0;
 
       for (let li = startLine; li < lines.length; li++) {
-        const maskedLine = masked.slice(lines[li].start, lines[li].end).trim();
-        if (!maskedLine) continue;
-
-        const opens =
-          /^(abstract\s+|final\s+)?class\b/.test(maskedLine) ||
-          /^namespace\b/.test(maskedLine) ||
-          /^enum\b/.test(maskedLine) ||
-          /^match\b/.test(maskedLine) ||
-          /^operator\s+/.test(maskedLine) ||
-          /^watch\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(maskedLine) ||
-          /^constructor\s*\(/.test(maskedLine) ||
-          /^(get|set)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(maskedLine) ||
-          /^defer\s*$/.test(maskedLine) ||
-          /^async\s+function\b/.test(maskedLine) ||
-          /^local\s+async\s+function\b/.test(maskedLine) ||
-          /^[A-Za-z_][A-Za-z0-9_.]*\s*=\s*function\s*\(/.test(maskedLine) ||
-          /^(public|private|protected|static|override|abstract|final|\s)*\s*(?:async\s+)?function\b/.test(maskedLine) ||
-          /^(?:async\s+)?function\b/.test(maskedLine) ||
-          /^local\s+(?:async\s+)?function\b/.test(maskedLine) ||
-          /^if\b.*\bthen\s*$/.test(maskedLine) ||
-          /^for\b.*\bdo\s*$/.test(maskedLine) ||
-          /^while\b.*\bdo\s*$/.test(maskedLine) ||
-          /^do\s*$/.test(maskedLine) ||
-          /^repeat\s*$/.test(maskedLine);
-
-        if (opens) depth++;
-
-        if (/^until\b/.test(maskedLine)) {
-          depth--;
-          if (depth === 0) return { start: lines[li].start, end: lines[li].end };
+        const cache = precomputed ? (precomputed.blockMarkers ||= []) : null;
+        let marker = cache?.[li];
+        if (marker === undefined) {
+          const maskedLine = masked.slice(lines[li].start, lines[li].end).trim();
+          const opens =
+            /^(abstract\s+|final\s+)?class\b/.test(maskedLine) ||
+            /^namespace\b/.test(maskedLine) ||
+            /^enum\b/.test(maskedLine) ||
+            /^match\b/.test(maskedLine) ||
+            /^operator\s+/.test(maskedLine) ||
+            /^watch\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(maskedLine) ||
+            /^constructor\s*\(/.test(maskedLine) ||
+            /^(get|set)\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/.test(maskedLine) ||
+            /^defer\s*$/.test(maskedLine) ||
+            /^async\s+function\b/.test(maskedLine) ||
+            /^local\s+async\s+function\b/.test(maskedLine) ||
+            /^[A-Za-z_][A-Za-z0-9_.]*\s*=\s*function\s*\(/.test(maskedLine) ||
+            /^(public|private|protected|static|override|abstract|final|\s)*\s*(?:async\s+)?function\b/.test(maskedLine) ||
+            /^(?:async\s+)?function\b/.test(maskedLine) ||
+            /^local\s+(?:async\s+)?function\b/.test(maskedLine) ||
+            /^if\b.*\bthen\s*$/.test(maskedLine) ||
+            /^for\b.*\bdo\s*$/.test(maskedLine) ||
+            /^while\b.*\bdo\s*$/.test(maskedLine) ||
+            /^do\s*$/.test(maskedLine) ||
+            /^repeat\s*$/.test(maskedLine);
+          marker = (opens ? 1 : 0) | (/^until\b/.test(maskedLine) ? 2 : 0) | (/^end\s*;?\s*$/.test(maskedLine) ? 4 : 0);
+          if (cache) cache[li] = marker;
         }
-
-        if (/^end\s*;?\s*$/.test(maskedLine)) {
+        if (marker & 1) depth++;
+        if (marker & 6) {
           depth--;
           if (depth === 0) return { start: lines[li].start, end: lines[li].end };
         }
@@ -548,29 +560,27 @@ local part = message[1:7]`;
     }
 
     function transpileNew(source) {
-      let masked = maskNonCode(source);
+      const masked = maskNonCode(source);
+      const pieces = [];
+      let cursor = 0, last = 0;
       while (true) {
-        const idx = findKeyword(masked, "new");
+        const idx = findKeyword(masked, "new", cursor);
         if (idx === -1) break;
-
         let i = idx + 3;
         while (/\s/.test(source[i] || "")) i++;
-
         const start = i;
         while (/[A-Za-z0-9_.]/.test(source[i] || "")) i++;
         const name = source.slice(start, i);
-
         if (!name) throw new Error("Expected class name after 'new'");
-
         let p = i;
         while (/\s/.test(source[p] || "")) p++;
-
-        const replacement = name + (source[p] === '(' ? '.new' : '.new()');
-        source = source.slice(0, idx) + replacement + source.slice(i);
-        masked = masked.slice(0, idx) + replacement + masked.slice(i);
+        pieces.push(source.slice(last, idx), name, source[p] === '(' ? '.new' : '.new()');
+        last = i;
+        cursor = i;
       }
-
-      return source;
+      if (!pieces.length) return source;
+      pieces.push(source.slice(last));
+      return pieces.join('');
     }
 
     function transpileEnum(source) {
@@ -741,14 +751,16 @@ local part = message[1:7]`;
         if (!headerMatch) throw new Error("Invalid class declaration");
         const name = headerMatch[1];
         const base = headerMatch[2] || null;
-        const endPos = findMatchingEndByLines(source, classIdx);
+        const endPos = findMatchingEndByLines(source, classIdx, {lines:splitLinesWithOffsets(source),masked});
         const body = source.slice(headerEnd + 1, endPos.start);
         const lines = splitLinesWithOffsets(body);
+        const blockIndex = {lines, masked: maskNonCode(body)};
         const fields = [], statics = [], methods = [], getters = [], setters = [], operators = [], signals = [], lazyFields = [], watchers = [];
         let ctor = null;
         let attrs = [];
         const declaredNames = new Set();
         const declaredProperties = new Set();
+        const watcherNames = new Set();
         let li = 0;
         while (li < lines.length) {
           const raw = lines[li].text;
@@ -759,7 +771,7 @@ local part = message[1:7]`;
             if (original.startsWith("@[")) {
               const group = readLauaAttributeGroup(body, at + 1);
               attrs.push(body.slice(at, group.end).trim());
-              const nextLine = lines.findIndex(line => line.start >= group.end);
+              const nextLine = lineIndexAfter(lines, group.end - 1);
               li = nextLine < 0 ? lines.length : nextLine;
             } else {
               attrs.push(original);
@@ -784,10 +796,10 @@ local part = message[1:7]`;
             if (declaredNames.has(meta)) throw new Error(`Duplicate operator '${symbol}'`);
             declaredNames.add(meta);
             const opStart = lines[li].start + raw.indexOf("operator");
-            const opEnd = findMatchingEndByLines(body, opStart);
+            const opEnd = findMatchingEndByLines(body, opStart, blockIndex);
             const newline = body.indexOf("\n", opStart);
             operators.push({ name: meta, params, body: body.slice(newline + 1, opEnd.start) });
-            li = lines.findIndex(line => line.start > opEnd.end);
+            li = lineIndexAfter(lines, opEnd.end);
             if (li < 0) break;
             continue;
           }
@@ -797,12 +809,13 @@ local part = message[1:7]`;
             const [, property, params] = watchMatch;
             const pieces = params.split(',').map(part => part.trim());
             if (pieces.length !== 2 || !pieces.every(piece => /^[A-Za-z_][\w]*$/.test(piece)) || pieces[0] === pieces[1]) throw new Error('watch requires (oldValue, newValue)');
-            if (watchers.some(item => item.name === property)) throw new Error(`Duplicate watcher '${property}'`);
+            if (watcherNames.has(property)) throw new Error(`Duplicate watcher '${property}'`);
+            watcherNames.add(property);
             const start = lines[li].start + raw.indexOf('watch');
-            const finish = findMatchingEndByLines(body, start);
+            const finish = findMatchingEndByLines(body, start, blockIndex);
             const newline = body.indexOf('\n', start);
             watchers.push({name: property, params, body: body.slice(newline + 1, finish.start)});
-            li = lines.findIndex(line => line.start > finish.end);
+            li = lineIndexAfter(lines, finish.end);
             if (li < 0) break;
             continue;
           }
@@ -838,7 +851,7 @@ local part = message[1:7]`;
             const kind = constructorMatch ? "constructor" : methodMatch[1];
             const indexInRaw = raw.indexOf(kind);
             const memberStart = lines[li].start + indexInRaw;
-            const memberEnd = findMatchingEndByLines(body, memberStart);
+            const memberEnd = findMatchingEndByLines(body, memberStart, blockIndex);
             const lineEnd = body.indexOf("\n", memberStart);
             const memberBody = body.slice(lineEnd + 1, memberEnd.start);
             const params = constructorMatch ? constructorMatch[1] : methodMatch[3];
@@ -869,7 +882,7 @@ local part = message[1:7]`;
                 declaredNames.add(member.name);
               }
             }
-            li = lines.findIndex(line => line.start > memberEnd.end);
+            li = lineIndexAfter(lines, memberEnd.end);
             if (li < 0) break;
             continue;
           }
@@ -990,7 +1003,10 @@ local part = message[1:7]`;
         generated += "end\n";
         generated += `\n${ctor?.attributes ? ctor.attributes + "\n" : ""}function ${name}.new(...)\n`;
         generated += `    if ${name}.__abstract then error("Cannot instantiate abstract class '${name}'") end\n`;
-        generated += `    local self = setmetatable({__lauaValues = {}, __lauaInitialized = {}}, ${name})\n    ${name}.__init(self, ...)\n    return self\nend\n`;
+        const instanceSlots = [];
+        if (base || watchers.length || lazyFields.length) instanceSlots.push('__lauaValues = {}');
+        if (base || lazyFields.length) instanceSlots.push('__lauaInitialized = {}');
+        generated += `    local self = setmetatable({${instanceSlots.join(', ')}}, ${name})\n    ${name}.__init(self, ...)\n    return self\nend\n`;
         for (const member of [...getters, ...setters]) {
           const tableName = getters.includes(member) ? "__getters" : "__setters";
           let memberBody = base ? replaceSuperReferences(member.body, base) : member.body;
@@ -1021,16 +1037,17 @@ local part = message[1:7]`;
 
     function wrapLauaDeferredBody(body) {
       const lines = splitLinesWithOffsets(body);
+      const blockIndex = {lines,masked:maskNonCode(body)};
       const deferred = [];
       for (let li = 0; li < lines.length; li++) {
         const line = lines[li];
         if (!/^\s*defer\s*$/.test(maskNonCode(line.text))) continue;
         const start = line.start + line.text.search(/\S/);
-        const end = findMatchingEndByLines(body, start);
+        const end = findMatchingEndByLines(body, start, blockIndex);
         const lineBreak = body.indexOf("\n", start);
         const deferredBody = body.slice(lineBreak + 1, end.start);
         deferred.push({ start, end: end.end, code: `table.insert(__lauaDefers, function()\n${normalizeBlockIndent(deferredBody, "    ")}\nend)` });
-        const nextLine = lines.findIndex(item => item.start > end.end);
+        const nextLine = lineIndexAfter(lines, end.end);
         if (nextLine === -1) break;
         li = nextLine - 1;
       }
@@ -1050,13 +1067,14 @@ local part = message[1:7]`;
       const functionPattern = /^\s*(?:(?:local\s+)?(?:async\s+)?function\s+[\w.:]+\s*\([^\n)]*\)|[\w.]+\s*=\s*function\s*\([^\n)]*\))[^\n]*$/gm;
       const matches = [];
       const masked = maskNonCode(source);
+      const blockIndex = {lines:splitLinesWithOffsets(source),masked};
       let match;
       while ((match = functionPattern.exec(source)) !== null) {
         const tokenAt = match[0].search(/\bfunction\b/);
         const at = match.index + tokenAt;
         if (masked.slice(at, at + "function".length) !== "function") continue;
         try {
-          const end = findMatchingEndByLines(source, at);
+          const end = findMatchingEndByLines(source, at, blockIndex);
           matches.push({ at, from: source.indexOf("\n", at) + 1 });
         } catch { /* syntax lint reports unmatched blocks */ }
       }
@@ -1077,11 +1095,15 @@ local part = message[1:7]`;
             nestedRanges.push([innerMatch.index, end.end]);
           } catch {}
         }
-        const hasOwnDefer = /^\s*defer\s*$/m.test(maskedInner.split("\n").map((line, i) => {
-          const offset = maskedInner.split("\n").slice(0,i).reduce((acc, v) => acc+v.length+1,0);
-          const inNested = nestedRanges.some(([start, end]) => offset >= start && offset <= end);
-          return inNested ? "" : line;
-        }).join("\n"));
+        let hasOwnDefer = false;
+        let innerOffset = 0;
+        for (const row of maskedInner.split('\n')) {
+          if (/^\s*defer\s*$/.test(row) && !nestedRanges.some(([start, end]) => innerOffset >= start && innerOffset <= end)) {
+            hasOwnDefer = true;
+            break;
+          }
+          innerOffset += row.length + 1;
+        }
         if (!hasOwnDefer) continue;
         const rewritten = wrapLauaDeferredBody(inner);
         if (rewritten.hasDefer) source = source.slice(0, fn.from) + rewritten.code + "\n" + source.slice(currentEnd.start);
@@ -1095,6 +1117,76 @@ local part = message[1:7]`;
         }
       }
       return source;
+    }
+
+    // Postfix nil guard: evaluate the expression once, and return from the
+    // enclosing function/chunk only if its value is nil (false is allowed).
+    // Limited to single-variable local/const declarations; this deliberately
+    // does not reinterpret optional type annotations or standalone `?` tokens.
+    function transpileEarlyReturn(source) {
+      return source.split('\n').map(raw => {
+        if (!raw.includes('?')) return raw;
+        const masked = maskNonCode(raw);
+        const end = masked.trimEnd();
+        if (!end.endsWith('?') || end.endsWith('??')) return raw;
+        const match = raw.match(/^([ \t]*)(local|const)\s+([A-Za-z_]\w*)(\s*:\s*[^=]+)?\s*=\s*(.+)\?\s*$/);
+        if (!match || !match[5].trim() || match[5].trimEnd().endsWith('?')) return raw;
+        const [, indent, , name, annotation, expr] = match;
+        // `const` is lowered to a Luau local binding; Luau does not enforce immutability.
+        return `${indent}local ${name}${annotation || ''} = ${expr.trimEnd()}\n${indent}if ${name} == nil then return end`;
+      }).join('\n');
+    }
+
+    // Explicit inline functions are a conservative compile-time specialization.
+    // Ordinary functions and dynamically replaced functions are never inlined.
+    // Only a pure constant or single-use parameter arithmetic return qualifies.
+    function transpileInlineFunctions(source) {
+      if (/\[(?:=*)\[|`/.test(source)) return source;
+      let cursor = 0;
+      while (true) {
+        const masked = maskNonCode(source);
+        const at = findKeyword(masked, 'inline', cursor);
+        if (at < 0) return source;
+        const lineStart = source.lastIndexOf('\n', at - 1) + 1;
+        if (source.slice(lineStart, at).trim()) { cursor = at + 6; continue; }
+        const headerEnd = source.indexOf('\n', at);
+        if (headerEnd < 0) throw new Error('inline function needs a body');
+        const header = source.slice(at, headerEnd);
+        const decl = /^inline\s+function\s+([A-Za-z_]\w*)\s*\(\s*([A-Za-z_]\w*)?\s*\)\s*$/.exec(header);
+        if (!decl) throw new Error('inline supports top-level functions with zero or one untyped parameter');
+        const [, name, param] = decl;
+        const adjusted = source.slice(0, at) + header.replace(/^inline\s+/, '') + source.slice(headerEnd);
+        const closing = findMatchingEndByLines(adjusted, at);
+        const adjustedHeaderEnd = adjusted.indexOf('\n', at);
+        const body = adjusted.slice(adjustedHeaderEnd + 1, closing.start).trim();
+        const pure = param ? new RegExp(`^return\\s+${param}\\s*([+*/-])\\s*(-?\\d+(?:\\.\\d+)?)$`).exec(body) : null;
+        const identity = !!param && body === `return ${param}`;
+        const constant = !param && /^return\s+(?:-?\d+(?:\.\d+)?|true|false|nil|"[^"\\\n]*"|'[^'\\\n]*')$/.test(body);
+        if (!pure && !identity && !constant) throw new Error(`inline function '${name}' must return a literal, its parameter, or parameter arithmetic with a number`);
+        const suffix = adjusted.slice(closing.end);
+        const mutation = new RegExp(`\\b${name}\\s*=(?!=)|\\blocal\\s+(?:function\\s+)?${name}\\b|\\bfunction\\s+${name}\\s*\\(`);
+        if (mutation.test(maskNonCode(suffix))) { source = adjusted; cursor = closing.end; continue; }
+        let next = suffix, offset = 0;
+        while (true) {
+          const code = maskNonCode(next);
+          const callPattern = new RegExp(`\\b${name}\\s*\\(`, 'g');
+          callPattern.lastIndex = offset;
+          const call = callPattern.exec(code);
+          if (!call) break;
+          const before = code[call.index - 1] || '';
+          if (/[.:@]/.test(before)) { offset = call.index + call[0].length; continue; }
+          const open = code.indexOf('(', call.index);
+          const close = findMatchingParen(next, open, code);
+          const argument = next.slice(open + 1, close).trim();
+          const simpleArg = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$|^-?\d+(?:\.\d+)?$|^[A-Za-z_]\w*\(\)$/.test(argument);
+          if ((param && !simpleArg) || (!param && argument)) { offset = close + 1; continue; }
+          const replacement = constant ? `(${body.slice(7).trim()})` : identity ? `(${argument})` : `((${argument}) ${pure[1]} ${pure[2]})`;
+          next = next.slice(0, call.index) + replacement + next.slice(close + 1);
+          offset = call.index + replacement.length;
+        }
+        source = adjusted.slice(0, closing.end) + next;
+        cursor = closing.end;
+      }
     }
 
     function transpileCore(source) {
@@ -1112,7 +1204,9 @@ local part = message[1:7]`;
       const names = [];
       const found = new Set();
       const lines = source.split('\n').map(line => {
-        if (!/^export\s+/.test(maskNonCode(line).trim()) || /^export\s+type\s+/.test(maskNonCode(line).trim())) return line;
+        if (!line.includes('export')) return line;
+        const code = maskNonCode(line).trim();
+        if (!/^export\s+/.test(code) || /^export\s+type\s+/.test(code)) return line;
         const match = line.match(/^([ \t]*)export\s+(.+)$/);
         if (!match) throw new Error('Invalid export statement');
         const rest = match[2];
@@ -1130,7 +1224,7 @@ local part = message[1:7]`;
       let serial = 0;
       return splitLinesWithOffsets(source).map(line => {
         const raw = line.text;
-        if (!/^import\b/.test(maskNonCode(raw).trim())) return raw;
+        if (!raw.includes('import') || !/^import\b/.test(maskNonCode(raw).trim())) return raw;
         const match = raw.match(/^([ \t]*)import\s+(?:([A-Za-z_]\w*)|\{([^{}]+)\})\s+from\s+(["'])([^"'\n]+)\4\s*$/);
         if (!match) throw new Error('Expected import Name or import {Name} from "./Module"');
         const [, indent, name, named, , path] = match;
@@ -1163,7 +1257,7 @@ local part = message[1:7]`;
       let id = 0;
       return splitLinesWithOffsets(source).map(line => {
         const raw = line.text;
-        if (!/^local\s*\{/.test(maskNonCode(raw).trim())) return raw;
+        if (!raw.includes('local') || !raw.includes('{') || !/^local\s*\{/.test(maskNonCode(raw).trim())) return raw;
         const match = raw.match(/^(\s*)local\s*\{([^{}]+)\}\s*=\s*(.+?)\s*$/);
         if (!match) throw new Error("Expected local {a, b} = tableExpression");
         const [, indent, names, expression] = match;
@@ -1223,12 +1317,18 @@ local part = message[1:7]`;
 
     function transpileMatches(source) {
       let serial = 0;
+      const lookupDefinitions = [];
       while (true) {
         const masked = maskNonCode(source);
         const candidates = [...masked.matchAll(/\bmatch\b/g)]
           .map(m => m.index)
           .filter(pos => masked.slice(masked.lastIndexOf('\n', pos - 1) + 1, pos).trim() === '');
-        if (!candidates.length) return source;
+        if (!candidates.length) {
+          if (!lookupDefinitions.length) return source;
+          // Keep Luau mode directives at the start of generated modules.
+          const header = source.match(/^(?:[ \t]*--![^\n]*(?:\n|$))*/)[0];
+          return header + lookupDefinitions.join('\n') + '\n' + source.slice(header.length);
+        }
         const at = candidates[candidates.length - 1];
         const headerEnd = source.indexOf('\n', at);
         if (headerEnd < 0) throw new Error('match needs cases');
@@ -1256,6 +1356,34 @@ local part = message[1:7]`;
           if (/^(?:end\s*$|until\b)/.test(code)) depth--;
         }
         if (!branches.length) throw new Error('match requires a case');
+        // Compile literal-only, returning matches to a single shared lookup.
+        // A table is allocated once per compiled module, not per dispatch.
+        // Complex patterns, guards, or side-effecting branches retain if/elseif.
+        const literalCases = [], usedKeys = new Set();
+        let defaultValue = null;
+        let canLookup = branches.length >= 3 && branches.at(-1).isDefault;
+        if (canLookup) {
+          for (const branch of branches) {
+            const bodyMatch = /^return\s+(.+?)\s*$/.exec(branch.body.join('\n').trim());
+            const value = bodyMatch?.[1];
+            if (!value || !/^(?:-?\d+(?:\.\d+)?|true|false|nil|"[^"\\\n]*"|'[^'\\\n]*')$/.test(value)) { canLookup = false; break; }
+            if (branch.isDefault) { defaultValue = value; continue; }
+            const keyMatch = /^(?:"([A-Za-z0-9_]+)"|'([A-Za-z0-9_]+)')$/.exec(branch.value.trim());
+            const key = keyMatch?.[1] || keyMatch?.[2];
+            if (!key || usedKeys.has(key) || value === 'nil') { canLookup = false; break; }
+            usedKeys.add(key);
+            literalCases.push(`[${JSON.stringify(key)}] = ${value}`);
+          }
+        }
+        if (canLookup) {
+          let tableName = `__lauaStaticMatch${++serial}`;
+          while (source.includes(tableName)) tableName = `__lauaStaticMatch${++serial}`;
+          const subjectName = `${tableName}_key`, resultName = `${tableName}_result`;
+          lookupDefinitions.push(`local ${tableName} = {${literalCases.join(', ')}}`);
+          const optimized = ['do', `    local ${subjectName} = ${subject}`, `    local ${resultName} = ${tableName}[${subjectName}]`, `    if ${resultName} ~= nil then return ${resultName} end`, `    return ${defaultValue}`, 'end'];
+          source = source.slice(0, at) + optimized.join('\n') + source.slice(closing.end);
+          continue;
+        }
         const variable = `__lauaMatch${++serial}`;
         const output = ['do', `    local ${variable} = ${subject}`];
         branches.forEach((branch, idx) => {
@@ -1332,6 +1460,14 @@ local part = message[1:7]`;
     }
 
     function transpileOptional(source) {
+      // Batch independent, simple property accesses without global rescans.
+      if (source.includes('\n') && source.includes('?.') && !source.includes('??') && !/["'`]/.test(source) && !source.includes('--') && !source.includes('\r')) {
+        const lines = source.split('\n');
+        const eligible = /^[ \t]*local\s+[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\?\.[A-Za-z_]\w*[ \t]*$/;
+        if (lines.every(line => !line.includes('?.') || eligible.test(line))) {
+          return lines.map(line => line.includes('?.') ? transpileOptional(line) : line).join('\n');
+        }
+      }
       let masked = maskNonCode(source);
       function rewrite(start, end, replacement) {
         source = source.slice(0, start) + replacement + source.slice(end);
@@ -1423,8 +1559,18 @@ local part = message[1:7]`;
     }
 
     function transpileCoalescing(source) {
+      // Independent single-line nil coalescing expressions can be lowered
+      // separately without repeatedly copying the entire source document.
+      if (source.includes('\n') && source.includes('??') && !/["'`]/.test(source) && !source.includes('--') && !source.includes('\r')) {
+        const lines = source.split('\n');
+        const eligible = /^[ \t]*local\s+[A-Za-z_]\w*\s*=\s*[A-Za-z_]\w*\s*\?\?\s*[A-Za-z_]\w*[ \t]*$/;
+        if (lines.every(line => !line.includes('??') || eligible.test(line))) {
+          return lines.map(line => line.includes('??') ? transpileCoalescing(line) : line).join('\n');
+        }
+      }
+      let masked = maskNonCode(source);
       while (true) {
-        const masked = maskNonCode(source), pos = masked.lastIndexOf('??');
+        const pos = masked.lastIndexOf('??');
         if (pos < 0) return source;
         const left = lauLeft(masked, pos - 1), right = lauRight(source, pos + 2);
         if (left < 0 || right < 0) throw new Error('Nil coalescing expects left ?? fallback');
@@ -1433,7 +1579,9 @@ local part = message[1:7]`;
         if (/[+\-*/%^<>~&|]$/.test(before) || /\b(?:and|or)$/.test(before)) throw new Error('Wrap compound ?? left operands in parentheses');
         if (/^[+\-*/%^<>=~&|]/.test(after) || /^\.\./.test(after) || /^(?:and|or)\b/.test(after)) throw new Error('Wrap compound ?? fallbacks in parentheses');
         const a = source.slice(left, pos).trim(), b = source.slice(pos + 2, right + 1).trim();
-        source = source.slice(0, left) + `__lauaCore.coalesce(${a}, function() return ${b} end)` + source.slice(right + 1);
+        const replacement = `__lauaCore.coalesce(${a}, function() return ${b} end)`;
+        source = source.slice(0, left) + replacement + source.slice(right + 1);
+        masked = masked.slice(0, left) + maskNonCode(replacement) + masked.slice(right + 1);
       }
     }
 
@@ -1565,20 +1713,22 @@ local part = message[1:7]`;
     // The playground embeds the same runtime implementations as transpiler.luau.
     // Generated output is self-contained; no sibling Laua runtime ModuleScripts are required.
     const LAUA_ASYNC_RUNTIME_SOURCE = "local Async = {}\nlocal Promise = {}\nPromise.__index = Promise\n\nlocal function isPromise(value)\n    return type(value) == \"table\" and getmetatable(value) == Promise\nend\n\nlocal function settle(promise, status, values)\n    if promise._status ~= \"Pending\" then return end\n    promise._status = status\n    promise._values = values\n    for _, thread in promise._waiters do\n        task.spawn(thread, status == \"Fulfilled\", table.unpack(values, 1, values.n))\n    end\n    table.clear(promise._waiters)\nend\n\nfunction Async.run(callback, ...)\n    assert(type(callback) == \"function\", \"Async.run expects a function\")\n    local promise = setmetatable({_status = \"Pending\", _values = nil, _waiters = {}}, Promise)\n    local args = table.pack(...)\n    task.spawn(function()\n        local result = table.pack(xpcall(function()\n            return callback(table.unpack(args, 1, args.n))\n        end, function(err) return err end))\n        if result[1] then\n            local values = table.pack(table.unpack(result, 2, result.n))\n            if values.n == 1 and isPromise(values[1]) then\n                local settled = table.pack(pcall(Async.await, values[1]))\n                if settled[1] then\n                    settle(promise, \"Fulfilled\", table.pack(table.unpack(settled, 2, settled.n)))\n                else\n                    settle(promise, \"Rejected\", table.pack(settled[2]))\n                end\n            else\n                settle(promise, \"Fulfilled\", values)\n            end\n        else\n            settle(promise, \"Rejected\", table.pack(result[2]))\n        end\n    end)\n    return promise\nend\n\nfunction Async.await(value)\n    if not isPromise(value) then\n        if type(value) == \"table\" and type(value.Wait) == \"function\" and type(value.Fire) == \"function\" then\n            return value:Wait()\n        end\n        return value\n    end\n    if value._status == \"Fulfilled\" then\n        return table.unpack(value._values, 1, value._values.n)\n    end\n    if value._status == \"Rejected\" then error(value._values[1], 2) end\n    local current = coroutine.running()\n    if not current then error(\"await requires a yieldable coroutine\", 2) end\n    table.insert(value._waiters, current)\n    local outcome = table.pack(coroutine.yield())\n    if not outcome[1] then error(outcome[2], 2) end\n    return table.unpack(outcome, 2, outcome.n)\nend\n\nfunction Promise:await()\n    return Async.await(self)\nend\n\nfunction Promise:andThen(callback)\n    return Async.run(function()\n        return callback(Async.await(self))\n    end)\nend\n\nfunction Promise:catch(callback)\n    return Async.run(function()\n        local result = table.pack(pcall(Async.await, self))\n        if result[1] then return table.unpack(result, 2, result.n) end\n        return callback(result[2])\n    end)\nend\n\nfunction Promise:finally(callback)\n    return Async.run(function()\n        local result = table.pack(pcall(Async.await, self))\n        callback()\n        if not result[1] then error(result[2], 0) end\n        return table.unpack(result, 2, result.n)\n    end)\nend\n\nfunction Promise:getStatus()\n    return self._status\nend\n\nAsync.Promise = Promise\nAsync.isPromise = isPromise\nreturn Async";
-    const LAUA_CORE_RUNTIME_SOURCE = "local LauaCore = {}\n\nfunction LauaCore.optional(value: any, key: any): any\n    if value == nil then return nil end\n    if typeof(value) == \"Instance\" then\n        local ok, result = pcall(function() return value[key] end)\n        if ok then return result end\n        if typeof(key) == \"string\" then return value:FindFirstChild(key) end\n        return nil\n    end\n    return value[key]\nend\n\nfunction LauaCore.coalesce(value: any, fallback: () -> any): any\n    if value ~= nil then return value end\n    return fallback()\nend\n\n\n-- Laua: spread merges consecutive array entries and then named keys.\nfunction LauaCore.spread(...: any): {[any]: any}\n    local result = {}\n    for index = 1, select(\"#\", ...) do\n        local item = select(index, ...)\n        assert(type(item) == \"table\", \"spread expects tables\")\n        for arrayIndex = 1, #item do\n            table.insert(result, item[arrayIndex])\n        end\n        for key, value in item do\n            if type(key) ~= \"number\" or key % 1 ~= 0 or key < 1 or key > #item then\n                result[key] = value\n            end\n        end\n    end\n    return result\nend\n\nfunction LauaCore.slice(value: any, first: number?, last: number?): any\n    local valueType = typeof(value)\n    if valueType == \"string\" then\n        return string.sub(value, first or 1, last or #value)\n    end\n    if valueType == \"buffer\" then\n        local length = buffer.len(value)\n        local startIndex = first or 1\n        local endIndex = last or length\n        if startIndex < 0 then startIndex = length + startIndex + 1 end\n        if endIndex < 0 then endIndex = length + endIndex + 1 end\n        startIndex = math.clamp(startIndex, 1, length + 1)\n        endIndex = math.clamp(endIndex, 0, length)\n        local size = math.max(0, endIndex - startIndex + 1)\n        local result = buffer.create(size)\n        if size > 0 then buffer.copy(result, 0, value, startIndex - 1, size) end\n        return result\n    end\n    error(\"slice supports strings and buffers only\")\nend\n\n\n-- Laua is: matches a Laua class or one of its ancestors.\nfunction LauaCore.is(value: any, class: any): boolean\n    if type(class) ~= \"table\" or type(value) ~= \"table\" then return false end\n    local candidate = getmetatable(value)\n    local visited = {}\n    while type(candidate) == \"table\" and not visited[candidate] do\n        if candidate == class then return true end\n        visited[candidate] = true\n        local meta = getmetatable(candidate)\n        candidate = type(meta) == \"table\" and meta.__index or nil\n    end\n    return false\nend\n\n-- Unlike an eager index, the index expression is not evaluated for nil.\nfunction LauaCore.optionalCall(value: any, callback: (any) -> any): any\n    if value == nil then return nil end\n    return callback(value)\nend\n\nfunction LauaCore.optionalIndex(value: any, key: () -> any): any\n    if value == nil then return nil end\n    local index = key()\n    if typeof(value) == \"Instance\" then\n        local ok, result = pcall(function() return value[index] end)\n        if ok then return result end\n        if typeof(index) == \"string\" then return value:FindFirstChild(index) end\n        return nil\n    end\n    return value[index]\nend\n\n-- Cache complete result tuples, including nils; cache keys use argument identity.\nfunction LauaCore.memo(callback: (...any) -> ...any): (...any) -> ...any\n    local root = {}\n    local nilKey = {}\n    local terminal = {}\n    return function(...)\n        local args = table.pack(...)\n        local node = root\n        for index = 1, args.n do\n            local key = args[index]\n            if key == nil then key = nilKey end\n            local nextNode = node[key]\n            if not nextNode then nextNode = {}; node[key] = nextNode end\n            node = nextNode\n        end\n        local cached = node[terminal]\n        if not cached then\n            cached = table.pack(callback(table.unpack(args, 1, args.n)))\n            node[terminal] = cached\n        end\n        return table.unpack(cached, 1, cached.n)\n    end\nend\n\nLauaCore.table = {}\n\nfunction LauaCore.table.filter(items: {any}, predicate: (any, number) -> boolean): {any}\n    local out = {}\n    for index, item in items do\n        if predicate(item, index) then table.insert(out, item) end\n    end\n    return out\nend\n\nfunction LauaCore.table.map(items: {any}, callback: (any, number) -> any): {any}\n    local out = {}\n    for index, item in items do\n        out[index] = callback(item, index)\n    end\n    return out\nend\n\nfunction LauaCore.table.reduce(items: {any}, callback: (any, any, number) -> any, initial: any): any\n    local current = initial\n    for index, item in items do current = callback(current, item, index) end\n    return current\nend\n\nfunction LauaCore.table.findWhere(items: {any}, predicate: (any, number) -> boolean): any\n    for index, item in items do\n        if predicate(item, index) then return item end\n    end\n    return nil\nend\n\n-- Lazy imports can break *some* initialisation cycles if neither module\n-- accesses the other before both have finished loading.\nfunction LauaCore.lazyModule(resolve: () -> any): any\n    local loaded = false\n    local target = nil\n    local function get()\n        if not loaded then\n            target = resolve()\n            loaded = true\n        end\n        return target\n    end\n    return setmetatable({}, {\n        __index = function(_, key) return get()[key] end,\n        __newindex = function(_, key, value) get()[key] = value end,\n        __call = function(_, ...) return get()(...) end,\n    })\nend\n\nreturn LauaCore";
+    const LAUA_CORE_RUNTIME_SOURCE = "local LauaCore = {}\n\nfunction LauaCore.optional(value: any, key: any): any\n    if value == nil then return nil end\n    if typeof(value) == \"Instance\" then\n        local ok, result = pcall(function() return value[key] end)\n        if ok then return result end\n        if typeof(key) == \"string\" then return value:FindFirstChild(key) end\n        return nil\n    end\n    return value[key]\nend\n\nfunction LauaCore.coalesce(value: any, fallback: () -> any): any\n    if value ~= nil then return value end\n    return fallback()\nend\n\n\n-- Laua: spread merges consecutive array entries and then named keys.\nfunction LauaCore.spread(...: any): {[any]: any}\n    local result = {}\n    for index = 1, select(\"#\", ...) do\n        local item = select(index, ...)\n        assert(type(item) == \"table\", \"spread expects tables\")\n        for arrayIndex = 1, #item do\n            table.insert(result, item[arrayIndex])\n        end\n        for key, value in item do\n            if type(key) ~= \"number\" or key % 1 ~= 0 or key < 1 or key > #item then\n                result[key] = value\n            end\n        end\n    end\n    return result\nend\n\nfunction LauaCore.slice(value: any, first: number?, last: number?): any\n    local valueType = typeof(value)\n    if valueType == \"string\" then\n        return string.sub(value, first or 1, last or #value)\n    end\n    if valueType == \"buffer\" then\n        local length = buffer.len(value)\n        local startIndex = first or 1\n        local endIndex = last or length\n        if startIndex < 0 then startIndex = length + startIndex + 1 end\n        if endIndex < 0 then endIndex = length + endIndex + 1 end\n        startIndex = math.clamp(startIndex, 1, length + 1)\n        endIndex = math.clamp(endIndex, 0, length)\n        local size = math.max(0, endIndex - startIndex + 1)\n        local result = buffer.create(size)\n        if size > 0 then buffer.copy(result, 0, value, startIndex - 1, size) end\n        return result\n    end\n    error(\"slice supports strings and buffers only\")\nend\n\n\n-- Laua is: matches a Laua class or one of its ancestors.\nfunction LauaCore.is(value: any, class: any): boolean\n    if type(class) ~= \"table\" or type(value) ~= \"table\" then return false end\n    local candidate = getmetatable(value)\n    local visited = {}\n    while type(candidate) == \"table\" and not visited[candidate] do\n        if candidate == class then return true end\n        visited[candidate] = true\n        local meta = getmetatable(candidate)\n        candidate = type(meta) == \"table\" and meta.__index or nil\n    end\n    return false\nend\n\n-- Unlike an eager index, the index expression is not evaluated for nil.\nfunction LauaCore.optionalCall(value: any, callback: (any) -> any): any\n    if value == nil then return nil end\n    return callback(value)\nend\n\nfunction LauaCore.optionalIndex(value: any, key: () -> any): any\n    if value == nil then return nil end\n    local index = key()\n    if typeof(value) == \"Instance\" then\n        local ok, result = pcall(function() return value[index] end)\n        if ok then return result end\n        if typeof(index) == \"string\" then return value:FindFirstChild(index) end\n        return nil\n    end\n    return value[index]\nend\n\n-- Cache complete result tuples, including nils; cache keys use argument identity.\nfunction LauaCore.memo(callback: (...any) -> ...any): (...any) -> ...any\n    local root = {}\n    local nilKey = {}\n    local terminal = {}\n    return function(...)\n        local node = root\n        for index = 1, select(\"#\", ...) do\n            local key = select(index, ...)\n            if key == nil then key = nilKey end\n            local nextNode = node[key]\n            if not nextNode then nextNode = {}; node[key] = nextNode end\n            node = nextNode\n        end\n        local cached = node[terminal]\n        if not cached then\n            cached = table.pack(callback(...))\n            node[terminal] = cached\n        end\n        return table.unpack(cached, 1, cached.n)\n    end\nend\n\nLauaCore.table = {}\n\nfunction LauaCore.table.filter(items: {any}, predicate: (any, number) -> boolean): {any}\n    local out = {}\n    for index, item in items do\n        if predicate(item, index) then table.insert(out, item) end\n    end\n    return out\nend\n\nfunction LauaCore.table.map(items: {any}, callback: (any, number) -> any): {any}\n    local out = {}\n    for index, item in items do\n        out[index] = callback(item, index)\n    end\n    return out\nend\n\nfunction LauaCore.table.reduce(items: {any}, callback: (any, any, number) -> any, initial: any): any\n    local current = initial\n    for index, item in items do current = callback(current, item, index) end\n    return current\nend\n\nfunction LauaCore.table.findWhere(items: {any}, predicate: (any, number) -> boolean): any\n    for index, item in items do\n        if predicate(item, index) then return item end\n    end\n    return nil\nend\n\n-- Lazy imports can break *some* initialisation cycles if neither module\n-- accesses the other before both have finished loading.\nfunction LauaCore.lazyModule(resolve: () -> any): any\n    local loaded = false\n    local target = nil\n    local function get()\n        if not loaded then\n            target = resolve()\n            loaded = true\n        end\n        return target\n    end\n    return setmetatable({}, {\n        __index = function(_, key) return get()[key] end,\n        __newindex = function(_, key, value) get()[key] = value end,\n        __call = function(_, ...) return get()(...) end,\n    })\nend\n\nreturn LauaCore";
     const LAUA_SIGNAL_RUNTIME_SOURCE = "local Signal = {}\nSignal.__index = Signal\n\nfunction Signal.new(typeNames: {string}?)\n    return setmetatable({ _event = Instance.new(\"BindableEvent\"), _destroyed = false, _types = typeNames }, Signal)\nend\n\nfunction Signal:Connect(callback: (...any) -> ())\n    assert(not self._destroyed, \"Cannot connect to a destroyed signal\")\n    assert(type(callback) == \"function\", \"Connect expects a function\")\n    return self._event.Event:Connect(callback)\nend\n\nfunction Signal:Once(callback: (...any) -> ())\n    assert(type(callback) == \"function\", \"Once expects a function\")\n    local connection\n    connection = self:Connect(function(...)\n        if connection then connection:Disconnect() end\n        callback(...)\n    end)\n    return connection\nend\n\nfunction Signal:Fire(...)\n    assert(not self._destroyed, \"Cannot fire a destroyed signal\")\n    local types = self._types\n    if types then\n        assert(select(\"#\", ...) == #types, \"Signal argument count mismatch\")\n        for index, name in types do\n            local value = select(index, ...)\n            local optional = name:sub(-1) == \"?\"\n            local typeName = optional and name:sub(1,-2) or name\n            if value == nil and optional then continue end\n            if typeof(value) ~= typeName then\n                if not (typeof(value) == \"Instance\" and value:IsA(typeName)) then\n                    error(\"Signal expected \" .. typeName .. \" at argument \" .. index, 2)\n                end\n            end\n        end\n    end\n    self._event:Fire(...)\nend\n\nfunction Signal:Wait()\n    assert(not self._destroyed, \"Cannot wait on a destroyed signal\")\n    return self._event.Event:Wait()\nend\n\nfunction Signal:Destroy()\n    if self._destroyed then return end\n    self._destroyed = true\n    self._event:Destroy()\nend\n\nreturn Signal";
 
     // Generate only the LauaCore helpers used by this file. This avoids
     // initializing unrelated functions in every compiled script, but keeps
     // every included helper unchanged (including its runtime behavior).
+    const LAUA_CORE_DECLARATIONS = [...LAUA_CORE_RUNTIME_SOURCE.matchAll(/^function LauaCore\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\(/gm)];
+    const LAUA_CORE_AVAILABLE = new Set(LAUA_CORE_DECLARATIONS.map(match => match[1]));
+
     function compactLauaCoreRuntime(source) {
       const masked = maskNonCode(source);
       if (/\b__lauaCore\s*\[/.test(masked)) return LAUA_CORE_RUNTIME_SOURCE;
 
       const requested = new Set([...masked.matchAll(/\b__lauaCore\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)/g)].map(match => match[1]));
-      const declarations = [...LAUA_CORE_RUNTIME_SOURCE.matchAll(/^function LauaCore\.([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\(/gm)];
-      const available = new Set(declarations.map(match => match[1]));
-      if ([...requested].some(name => !available.has(name))) return LAUA_CORE_RUNTIME_SOURCE;
+      const declarations = LAUA_CORE_DECLARATIONS;
+      if ([...requested].some(name => !LAUA_CORE_AVAILABLE.has(name))) return LAUA_CORE_RUNTIME_SOURCE;
 
       const pieces = ["local LauaCore = {}"];
       if ([...requested].some(name => name.startsWith("table."))) pieces.push("LauaCore.table = {}");
@@ -1609,9 +1759,8 @@ local part = message[1:7]`;
     }
 
     function validatePendingFeatures(source) {
-      for (const raw of source.split('\n')) {
-        const line = maskNonCode(raw).trim();
-        const pending = [
+      if (!/(?:for|while|repeat|break|continue|unique|type|function|regex\.)/.test(source)) return;
+      const pending = [
           [/^[A-Za-z_]\w*:\s*(?:for|while|repeat)\b/, 'Labeled loop exits'],
           [/^(?:break|continue)\s+[A-Za-z_]\w*$/, 'Labeled loop control'],
           [/^unique\s+type\s+/, 'Nominal/unique types'],
@@ -1619,7 +1768,10 @@ local part = message[1:7]`;
           [/^type\s+[A-Za-z_]\w*\s*=\s*(?:truthy|falsy)\s*$/, 'Truthy/falsy types'],
           [/^function\s+[A-Za-z_][\w.:]*\s*<[^>]*:\s*[A-Za-z_]\w*[^>]*>/, 'Constrained generics'],
           [/\bregex\.(?:match|find)\s*\(/, 'Full regular expressions']
-        ];
+      ];
+      for (const raw of source.split('\n')) {
+        if (!/(?:for|while|repeat|break|continue|unique|type|regex\.|function[^\n]*<)/.test(raw)) continue;
+        const line = maskNonCode(raw).trim();
         for (const [pattern,feature] of pending) {
           if (pattern.test(line)) throw new Error(`${feature} are not implemented in this v3.9 playground.`);
         }
@@ -1629,6 +1781,7 @@ local part = message[1:7]`;
     function transpileAdditionalSyntax(source) {
       let serial = 0;
       return source.split("\n").map(raw => {
+        if (!/=>|\.\.\.|\[|table\.|import|@nolint/.test(raw)) return raw;
         const trimmed = raw.trim();
         const masked = maskNonCode(raw).trim();
         const indent = raw.match(/^[\t ]*/)[0];
@@ -1657,7 +1810,8 @@ local part = message[1:7]`;
           if (!slice[3] && !slice[4]) throw new Error('Slice requires at least one bound');
           raw = `${slice[1]}__lauaCore.slice(${slice[2]}, ${slice[3]||'nil'}, ${slice[4]||'nil'})${slice[5]}`;
         }
-        for (const name of ['filter','map','reduce','findWhere']) {
+        if (raw.includes('table.')) for (const name of ['filter','map','reduce','findWhere']) {
+          if (!raw.includes('table.' + name)) continue;
           const regex = new RegExp('\\btable\\.'+name+'\\s*\\\(', 'g');
           const code = maskNonCode(raw);
           const indices = [...code.matchAll(regex)].map(m=>m.index);
@@ -1746,6 +1900,7 @@ local part = message[1:7]`;
 
     function transpileParameterDefaults(source) {
       return source.split('\n').map(raw=>{
+        if (!raw.includes('function') || !raw.includes('=')) return raw;
         const masked=maskNonCode(raw);
         const at=/\bfunction\b/.exec(masked);
         if (!at) return raw;
@@ -1795,12 +1950,13 @@ local part = message[1:7]`;
     function validateKnownVisibility(source) {
       if(!/\b(?:private|protected)\b/.test(source))return;
       const masked = maskNonCode(source), classes = new Map();
+      const blockIndex = {lines:splitLinesWithOffsets(source),masked};
       const declarations = /\bclass\s+([A-Za-z_]\w*)(?:\s+extends\s+([A-Za-z_]\w*))?/g;
       for (const decl of masked.matchAll(declarations)) {
         const headerEnd=source.indexOf('\n',decl.index);
         if(headerEnd<0) continue;
         let last;
-        try { last=findMatchingEndByLines(source,decl.index); } catch { continue; }
+        try { last=findMatchingEndByLines(source,decl.index,blockIndex); } catch { continue; }
         const members = new Map();
         const body = masked.slice(headerEnd+1,last.start);
         for(const line of body.split('\n')) {
@@ -1862,6 +2018,7 @@ local part = message[1:7]`;
       // Skip whole-file transforms when their syntax cannot occur. Check the
       // current text at each stage because an earlier pass can introduce syntax.
       if (source.includes('--#')) source = preprocessMode(source,mode);
+      if (source.includes('inline')) source = transpileInlineFunctions(source);
       validateKnownVisibility(source);
       validatePendingFeatures(source);
       if (source.includes('|>')) source = transpilePipelines(source);
@@ -1878,6 +2035,7 @@ local part = message[1:7]`;
       if (source.includes('match')) source = transpileMatches(source);
       if (source.includes('?.')) source = transpileOptional(source);
       if (source.includes('??')) source = transpileCoalescing(source);
+      if (source.includes('?')) source = transpileEarlyReturn(source);
       if (source.includes('defer')) source = transpileDeferFunctions(source);
       const asynchronous = source.includes('async') ? transpileAsyncFunctions(source) : {source, count:0};
       const awaited = asynchronous.source.includes('await') ? transpileAwaits(asynchronous.source) : {source:asynchronous.source, count:0};
@@ -1889,6 +2047,8 @@ local part = message[1:7]`;
       output = output.replace(/[\t ]+(?=\n|$)/g, '');
       return style==='Compact' ? compactGeneratedOutput(output) : output;
     }
+
+
 
     function buildLauaSymbolIndex(source) {
       const symbols = {
@@ -6274,41 +6434,67 @@ local part = message[1:7]`;
         return result;
       }
 
-      // Small ZIP writer: uncompressed ZIP entries, CRC-32, UTF-8 filenames.
-      // Runs entirely in the page: no extra JavaScript dependency or runtime modules.
-      function makeProjectZip(files) {
-        const utf8=new TextEncoder();
-        const crcTable=new Uint32Array(256);
-        for(let i=0;i<256;i++) {
-          let crc=i;
-          for(let j=0;j<8;j++) crc=(crc & 1)?(0xedb88320^(crc>>>1)):(crc>>>1);
-          crcTable[i]=crc>>>0;
+      // A native Roblox XML model: compiled ModuleScripts and lossless source
+      // StringValues in separate folder trees. ZIP import remains available.
+      function makeProjectRbxmx(files) {
+        const invalidXml = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\ufffe\uffff]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/u;
+        const escapeXml = value => {
+          const text = String(value);
+          if (invalidXml.test(text)) throw new Error("A Laua source contains characters unsupported by Roblox XML. Remove invalid control characters before exporting.");
+          return text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/'/g,"&apos;").replace(/\r/g,"&#13;");
+        };
+        const cdata = value => {
+          const text=String(value);
+          if(invalidXml.test(text)) throw new Error("A compiled Luau file contains characters unsupported by Roblox XML.");
+          return "<![CDATA["+text.replace(/]]>/g,"]]]]><![CDATA[>")+"]]>";
+        };
+        const folder = name => ({kind:"Folder",name,children:[],dirs:new Map()});
+        const project=folder("LauaProject");
+        const modules=folder("Modules"), sources=folder("LauaSources"), maps=folder("SourceMaps");
+        project.children.push(modules,sources);
+        const errors=[];
+        function attach(base, path, kind, value) {
+          const parts=path.split("/");
+          let parent=base;
+          for(let i=0;i<parts.length-1;i++){
+            const part=parts[i];
+            if(!parent.dirs.has(part)) {
+              const child=folder(part);
+              parent.children.push(child);
+              parent.dirs.set(part,child);
+            }
+            parent=parent.dirs.get(part);
+          }
+          const name=kind==="ModuleScript" ? parts.at(-1).replace(/\.luau$/,"") : parts.at(-1);
+          parent.children.push({kind,name,value});
         }
-        function crc32(bytes) {let crc=0xffffffff;for(const byte of bytes)crc=crcTable[(crc^byte)&255]^(crc>>>8);return (crc^0xffffffff)>>>0;}
-        function u16(buffer,offset,v){buffer.setUint16(offset,v,true);}
-        function u32(buffer,offset,v){buffer.setUint32(offset,v>>>0,true);}
-        const blocks=[],central=[];
-        let offset=0;
-        for(const entry of files) {
-          const filename=utf8.encode(entry.name),data=utf8.encode(entry.content);
-          if(filename.length>65535 || data.length>0xffffffff) throw new Error("Project file too large for ZIP export.");
-          const crc=crc32(data),length=30+filename.length+data.length;
-          const local=new Uint8Array(length),view=new DataView(local.buffer);
-          u32(view,0,0x04034b50);u16(view,4,20);u16(view,6,0x0800);u16(view,8,0);
-          u32(view,14,crc);u32(view,18,data.length);u32(view,22,data.length);u16(view,26,filename.length);
-          local.set(filename,30);local.set(data,30+filename.length);blocks.push(local);
-          const record=new Uint8Array(46+filename.length),c=new DataView(record.buffer);
-          u32(c,0,0x02014b50);u16(c,4,20);u16(c,6,20);u16(c,8,0x0800);
-          u32(c,16,crc);u32(c,20,data.length);u32(c,24,data.length);u16(c,28,filename.length);u32(c,42,offset);
-          record.set(filename,46);central.push(record);offset+=length;
+        for(const entry of files){
+          // Do not discard even an empty or uncompileable Laua source.
+          attach(sources,entry.sourceName,"StringValue",entry.source);
+          if(entry.error){errors.push(entry.sourceName+": "+entry.error);continue;}
+          attach(modules,entry.outputName,"ModuleScript",entry.output);
+          if(entry.sourceMap !== undefined && entry.sourceMap !== null) attach(maps,entry.outputName+".map.json","StringValue",entry.sourceMap);
         }
-        if(central.length>65535)throw new Error("Too many files for ZIP export.");
-        const directorySize=central.reduce((a,b)=>a+b.length,0),eocd=new Uint8Array(22),end=new DataView(eocd.buffer);
-        u32(end,0,0x06054b50);u16(end,8,central.length);u16(end,10,central.length);
-        u32(end,12,directorySize);u32(end,16,offset);
-        return new Blob([...blocks,...central,eocd],{type:"application/zip"});
+        if(maps.children.length) project.children.push(maps);
+        if(errors.length) project.children.push({kind:"StringValue",name:"CompilationErrors",value:errors.join("\n")});
+        let referent=0;
+        const fragments=['<?xml version="1.0" encoding="utf-8"?>\n',
+          '<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">',
+          '<External>null</External><External>nil</External>'];
+        const emit=node=>{
+          fragments.push('<Item class="',node.kind,'" referent="RBXLAUA',String(++referent),'"><Properties>',
+            '<string name="Name">',escapeXml(node.name),'</string>');
+          if(node.kind==="ModuleScript") fragments.push('<ProtectedString name="Source">',cdata(node.value),'</ProtectedString>');
+          if(node.kind==="StringValue") fragments.push('<string name="Value">',escapeXml(node.value),'</string>');
+          fragments.push('</Properties>');
+          for(const child of node.children||[]) emit(child);
+          fragments.push('</Item>');
+        };
+        emit(project);
+        fragments.push('</roblox>');
+        const xml=fragments.join('');
+        return {blob:new Blob([xml],{type:"application/xml;charset=utf-8"}),errors};
       }
-
 
       // ZIP importer supports store and DEFLATE (when browser DecompressionStream
       // supports deflate-raw). Validate EVERY archive entry before touching project.
@@ -6343,7 +6529,7 @@ local part = message[1:7]`;
           if(payloadStart+packed>bytes.length)throw new Error("Truncated ZIP data.");
           let data=bytes.slice(payloadStart,payloadStart+packed);
           if(method===8) {
-            if(typeof DecompressionStream!=="function")throw new Error("This browser cannot read compressed ZIP entries. Export an uncompressed Laua project instead.");
+            if(typeof DecompressionStream!=="function")throw new Error("This browser cannot read compressed ZIP entries. Import an uncompressed project ZIP or use a browser supporting DEFLATE.");
             const stream=new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
             const chunks=[],reader=stream.getReader();let received=0;
             while(true){
@@ -6395,27 +6581,13 @@ local part = message[1:7]`;
       async function exportProject() {
         try {
           const all=compileProjectFiles();
-          const entries=[];
-          const failures=[];
-          let generatedCount=0;
-          for(const item of all) {
-            // Every tab, including empty and uncompiled files, goes into ZIP.
-            entries.push({name:"source/"+item.sourceName,content:item.source});
-            if (item.error) {
-              failures.push(`${item.sourceName}: ${item.error}`);
-            } else {
-              entries.push({name:"luau/"+item.outputName,content:item.output});
-              entries.push({name:"maps/"+item.outputName+".map.json",content:JSON.stringify(makeSourceLineMap(item.source,item.output,item.sourceName),null,2)});
-              generatedCount++;
-            }
+          for(const entry of all){
+            if(!entry.error) entry.sourceMap=JSON.stringify(makeSourceLineMap(entry.source,entry.output,entry.sourceName),null,2);
           }
-          if (failures.length) {
-            entries.push({name:"COMPILATION_ERRORS.txt",content:"The Laua source files were all exported. Some generated Luau files were omitted because compilation failed.\n\n"+failures.join("\n")+"\n"});
-          }
-          const zip=makeProjectZip(entries);
-          downloadProjectBlob("Laua-v3.19-project.zip",zip);
-          projectStatus().textContent=`Exported all ${all.length} Laua source files and ${generatedCount} Luau outputs.${failures.length?` ${failures.length} file(s) failed; see COMPILATION_ERRORS.txt in the ZIP.`:""}`;
-          projectStatus().className=failures.length?"error":"ok";
+          const {blob,errors}=makeProjectRbxmx(all);
+          downloadProjectBlob("Laua-v3.22-project.rbxmx",blob);
+          projectStatus().textContent=`Exported ${all.length} Laua sources and ${all.length-errors.length} compiled ModuleScripts as a Roblox model.${errors.length?` ${errors.length} file(s) failed compilation; see CompilationErrors inside the model.`:""}`;
+          projectStatus().className=errors.length?"error":"ok";
         } catch(error) {
           projectStatus().textContent=error?.message || String(error);
           projectStatus().className="error";
