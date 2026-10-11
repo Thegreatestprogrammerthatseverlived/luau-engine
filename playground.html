@@ -75,7 +75,7 @@
   <header>
     <div class="brand">
       <h1>Laua Playground</h1>
-      <span>pronounced “Lawah” · v3.16 · multi-file · optimized output · live lint</span>
+      <span>pronounced “Lawah” · v3.19 · multi-file · optimized output · live lint</span>
     </div>
     <div class="actions">
       <button id="exampleBtn" title="Load the built-in starter example into main.laua (other files stay unchanged)">Default main.laua</button>
@@ -97,7 +97,7 @@
       </label>
       <button id="transpileBtn">Transpile</button>
       <button id="testsBtn" title="Run compiler regression tests">Tests</button>
-      <button id="diffBtn" title="Compare the last two generated outputs">Output Diff</button>
+      <button id="diffBtn" title="Compare the last two successful manual transpiles (including different files)">Output Diff</button>
       <button id="docsBtn" title="Generate reference documentation from Laua declarations">Docs</button>
       <button id="exportBtn" title="Export active file as Luau">Export Luau</button>
       <button id="exportProjectBtn" title="Export every Laua source, generated Luau, and source mappings">Export Project ZIP</button>
@@ -369,6 +369,7 @@ local part = message[1:7]`;
     }
 
     function maskNonCode(source, preserveDirectives = false) {
+      if (!source.includes('"') && !source.includes("'") && !source.includes('--')) return source;
       const out = source.split("");
       let i = 0;
       let quote = null;
@@ -487,23 +488,25 @@ local part = message[1:7]`;
     function splitLinesWithOffsets(source) {
       const lines = [];
       let start = 0;
-      for (let i = 0; i <= source.length; i++) {
-        if (i === source.length || source[i] === "\n") {
-          lines.push({ start, end: i, text: source.slice(start, i) });
-          start = i + 1;
+      while (true) {
+        const end = source.indexOf('\n', start);
+        if (end < 0) {
+          lines.push({ start, end: source.length, text: source.slice(start) });
+          return lines;
         }
+        lines.push({ start, end, text: source.slice(start, end) });
+        start = end + 1;
       }
-      return lines;
     }
 
     function findMatchingEndByLines(source, startIndex) {
       const lines = splitLinesWithOffsets(source);
+      const masked = maskNonCode(source);
       const startLine = lines.findIndex(line => startIndex >= line.start && startIndex <= line.end);
       let depth = 0;
 
       for (let li = startLine; li < lines.length; li++) {
-        const raw = lines[li].text;
-        const maskedLine = maskNonCode(raw).trim();
+        const maskedLine = masked.slice(lines[li].start, lines[li].end).trim();
         if (!maskedLine) continue;
 
         const opens =
@@ -545,8 +548,8 @@ local part = message[1:7]`;
     }
 
     function transpileNew(source) {
+      let masked = maskNonCode(source);
       while (true) {
-        const masked = maskNonCode(source);
         const idx = findKeyword(masked, "new");
         if (idx === -1) break;
 
@@ -562,11 +565,9 @@ local part = message[1:7]`;
         let p = i;
         while (/\s/.test(source[p] || "")) p++;
 
-        if (source[p] === "(") {
-          source = source.slice(0, idx) + name + ".new" + source.slice(i);
-        } else {
-          source = source.slice(0, idx) + name + ".new()" + source.slice(i);
-        }
+        const replacement = name + (source[p] === '(' ? '.new' : '.new()');
+        source = source.slice(0, idx) + replacement + source.slice(i);
+        masked = masked.slice(0, idx) + replacement + masked.slice(i);
       }
 
       return source;
@@ -912,6 +913,30 @@ local part = message[1:7]`;
         if (!base && /\bsuper\s*[:.(]/.test(maskNonCode(constructorBody))) throw new Error(`Class '${name}' has no parent for super`);
         if (base) constructorBody = replaceSuperReferences(constructorBody, base);
         if (ctor && !base && /\bsuper\b/.test(maskNonCode(constructorBody))) throw new Error(`Class '${name}' has no parent for super`);
+        // An ordinary class only needs a metatable, constructor, fields, and methods.
+        // Advanced class hooks are emitted only for classes that use them.
+        const plainClass = !base && !isAbstract && !isFinal && !getters.length && !setters.length && !lazyFields.length && !watchers.length && !ctor?.attributes && methods.every(member => !member.abstract && !member.final && !member.override);
+        if (plainClass) {
+          let output = `local ${name} = {}\n${name}.__index = ${name}\n`;
+          for (const field of statics) output += `${name}.${field.name} = ${transpileCore(field.value)}\n`;
+          output += `function ${name}.__init(self${ctor?.params?.trim() ? ", " + ctor.params : ""})\n`;
+          for (const field of fields) output += `    self.${field.name} = ${transpileCore(field.value)}\n`;
+          for (const item of signals) output += `    self.${item.name} = __lauaSignal.new(${item.types.length ? '{' + item.types.map(t => JSON.stringify(t)).join(', ') + '}' : ''})\n`;
+          const initBody = normalizeBlockIndent(transpileCore(constructorBody), "    ");
+          if (initBody) output += initBody + "\n";
+          output += `end\nfunction ${name}.new(...)\n    local self = setmetatable({}, ${name})\n    ${name}.__init(self, ...)\n    return self\nend\n`;
+          for (const operator of operators) {
+            const memberBody = normalizeBlockIndent(transpileCore(operator.body), "    ");
+            output += `function ${name}.${operator.name}(self${operator.params ? ", " + operator.params : ""})\n${memberBody ? memberBody + "\n" : ""}end\n`;
+          }
+          for (const member of methods) {
+            const memberBody = normalizeBlockIndent(transpileCore(member.body), "    ");
+            if (/\bsuper\s*\(/.test(maskNonCode(member.body))) throw new Error("super(...) can only be called in constructors");
+            output += `${member.attributes ? member.attributes + "\n" : ""}${member.kind === "async function" ? "async " : ""}function ${name}${member.static ? "." : ":"}${member.name}(${member.params})\n${memberBody ? memberBody + "\n" : ""}end\n`;
+          }
+          source = source.slice(0, declStart) + output.trimEnd() + source.slice(endPos.end);
+          continue;
+        }
         const getTableMeta = base ? `setmetatable({}, {__index = ${base}.__getters})` : "{}";
         const setTableMeta = base ? `setmetatable({}, {__index = ${base}.__setters})` : "{}";
         const ownFinalMethods = methods.filter(method => method.final).map(method => `[${JSON.stringify(method.name)}] = true`).join(", ");
@@ -1020,6 +1045,7 @@ local part = message[1:7]`;
     }
 
     function transpileDeferFunctions(source) {
+      if (!source.includes('defer')) return source;
       // Process the innermost function first, so each defer belongs to the correct function.
       const functionPattern = /^\s*(?:(?:local\s+)?(?:async\s+)?function\s+[\w.:]+\s*\([^\n)]*\)|[\w.]+\s*=\s*function\s*\([^\n)]*\))[^\n]*$/gm;
       const matches = [];
@@ -1072,10 +1098,10 @@ local part = message[1:7]`;
     }
 
     function transpileCore(source) {
-      source = transpileEnum(source);
-      source = transpileNamespace(source);
-      source = transpileClass(source);
-      source = transpileNew(source);
+      if (source.includes('enum')) source = transpileEnum(source);
+      if (source.includes('namespace')) source = transpileNamespace(source);
+      if (source.includes('class')) source = transpileClass(source);
+      if (source.includes('new')) source = transpileNew(source);
       return source;
     }
 
@@ -1306,8 +1332,13 @@ local part = message[1:7]`;
     }
 
     function transpileOptional(source) {
+      let masked = maskNonCode(source);
+      function rewrite(start, end, replacement) {
+        source = source.slice(0, start) + replacement + source.slice(end);
+        masked = masked.slice(0, start) + maskNonCode(replacement) + masked.slice(end);
+      }
       while (true) {
-        const masked = maskNonCode(source), pos = masked.indexOf('?.');
+        const pos = masked.indexOf('?.');
         if (pos < 0) return source;
         const left = lauLeft(masked, pos - 1);
         const member = /^([A-Za-z_][\w]*)/.exec(masked.slice(pos + 2));
@@ -1322,7 +1353,7 @@ local part = message[1:7]`;
           if(closing<0) throw new Error('Unclosed optional function call');
           const receiver=source.slice(left,pos).trim();
           const args=source.slice(pos+3,closing);
-          source=source.slice(0,left)+`__lauaCore.optionalCall(${receiver}, function(__lauaReceiver) return __lauaReceiver(${args}) end)`+source.slice(closing+1);
+          rewrite(left, closing+1, `__lauaCore.optionalCall(${receiver}, function(__lauaReceiver) return __lauaReceiver(${args}) end)`);
           continue;
         }
         if (masked[pos+2]==='[') {
@@ -1336,7 +1367,7 @@ local part = message[1:7]`;
           const key=source.slice(pos+3,closing).trim();
           if(!key)throw new Error('Optional index requires a key');
           const receiver=source.slice(left,pos).trim();
-          source=source.slice(0,left)+`__lauaCore.optionalIndex(${receiver}, function() return ${key} end)`+source.slice(closing+1);
+          rewrite(left, closing+1, `__lauaCore.optionalIndex(${receiver}, function() return ${key} end)`);
           continue;
         }
         const colon=masked[pos+2]===':';
@@ -1356,12 +1387,12 @@ local part = message[1:7]`;
           const receiver=source.slice(left,pos).trim();
           const args=source.slice(openAt+1,closing);
           const invoke=`__lauaMethod(${colon?'__lauaReceiver'+(args.trim()? ', ':'') : ''}${args})`;
-          source=source.slice(0,left)+`__lauaCore.optionalCall(${receiver}, function(__lauaReceiver) local __lauaMethod = __lauaCore.optional(__lauaReceiver, "${name[1]}"); if __lauaMethod == nil then return nil end; return ${invoke} end)`+source.slice(closing+1);
+          rewrite(left, closing+1, `__lauaCore.optionalCall(${receiver}, function(__lauaReceiver) local __lauaMethod = __lauaCore.optional(__lauaReceiver, "${name[1]}"); if __lauaMethod == nil then return nil end; return ${invoke} end)`);
           continue;
         }
         if(colon)throw new Error('Optional colon access requires a method call');
         const base = source.slice(left, pos).trim();
-        source = source.slice(0, left) + `__lauaCore.optional(${base}, "${member[1]}")` + source.slice(pos + 2 + member[1].length);
+        rewrite(left, pos + 2 + member[1].length, `__lauaCore.optional(${base}, "${member[1]}")`);
       }
     }
 
@@ -1825,23 +1856,37 @@ local part = message[1:7]`;
     function transpile(source, options = {}) {
       const mode = typeof options === 'object' && options !== null ? (options.Mode || 'Development') : 'Development';
       if (!['Development','Release','Debug'].includes(mode)) throw new Error('Invalid Laua compile mode');
-      source = preprocessMode(source,mode);
+      const style=options?.OutputStyle || 'Readable';
+      if (!['Readable','Compact'].includes(style))throw new Error('Invalid Laua output style');
+
+      // Skip whole-file transforms when their syntax cannot occur. Check the
+      // current text at each stage because an earlier pass can introduce syntax.
+      if (source.includes('--#')) source = preprocessMode(source,mode);
       validateKnownVisibility(source);
       validatePendingFeatures(source);
-      source = transpilePipelines(source);
-      source = transpileMemo(source);
-      source = transpileIsOperator(source);
-      source = transpileAdditionalSyntax(source);
-      const exported = transpileExports(source);
-      const deferred = transpileDeferFunctions(transpileExtensions(transpileCore(transpileUsing(transpileCoalescingAssign(exported.source)))));
-      const asynchronous = transpileAsyncFunctions(deferred);
-      const awaited = transpileAwaits(asynchronous.source);
-      if (awaited.count && !asynchronous.count) throw new Error("await requires an async function");
-      let output = insertLauaEmbeddedRuntimes(transpileParameterDefaults(awaited.source));
+      if (source.includes('|>')) source = transpilePipelines(source);
+      if (source.includes('memo')) source = transpileMemo(source);
+      if (/\bis\b/.test(source)) source = transpileIsOperator(source);
+      if (source.includes('=>') || source.includes('...') || source.includes('[') || source.includes('table.') || source.includes('import') || source.includes('@nolint')) source = transpileAdditionalSyntax(source);
+      const exported = source.includes('export') ? transpileExports(source) : {source, names:[]};
+      source = exported.source;
+      if (source.includes('??=')) source = transpileCoalescingAssign(source);
+      if (source.includes('using')) source = transpileUsing(source);
+      source = transpileCore(source);
+      if (source.includes('import')) source = transpileImports(source);
+      if (source.includes('local') && source.includes('{')) source = transpileDestructuring(source);
+      if (source.includes('match')) source = transpileMatches(source);
+      if (source.includes('?.')) source = transpileOptional(source);
+      if (source.includes('??')) source = transpileCoalescing(source);
+      if (source.includes('defer')) source = transpileDeferFunctions(source);
+      const asynchronous = source.includes('async') ? transpileAsyncFunctions(source) : {source, count:0};
+      const awaited = asynchronous.source.includes('await') ? transpileAwaits(asynchronous.source) : {source:asynchronous.source, count:0};
+      if (awaited.count && !asynchronous.count) throw new Error('await requires an async function');
+      let output = awaited.source;
+      if (/\bfunction[^\n]*\([^\n)]*=/.test(output)) output = transpileParameterDefaults(output);
+      if (output.includes('__laua')) output = insertLauaEmbeddedRuntimes(output);
       if (exported.names.length) output += `\nreturn {${exported.names.map(name => `${name} = ${name}`).join(', ')}}`;
-      output = output.split("\n").map(line => line.replace(/[\t ]+$/g, "")).join("\n");
-      const style=options?.OutputStyle || "Readable";
-      if (!['Readable','Compact'].includes(style))throw new Error('Invalid Laua output style');
+      output = output.replace(/[\t ]+(?=\n|$)/g, '');
       return style==='Compact' ? compactGeneratedOutput(output) : output;
     }
 
@@ -6079,10 +6124,6 @@ local part = message[1:7]`;
         file.disposeChange=model.onDidChangeContent(()=>{
           file.generated=null;
           file.output.setValue("");
-          if (activeFile === file.name) {
-            lastSuccessfulLuau=null;
-            priorSuccessfulLuau=null;
-          }
           rememberProject();
           refreshEditorIntelligence();
         });
@@ -6105,8 +6146,6 @@ local part = message[1:7]`;
         if (next.sourceView) lauaEditor.restoreViewState(next.sourceView);
         if (next.outputView) luauEditor.restoreViewState(next.outputView);
         document.getElementById("outputFilename").textContent=removeLauaExtension(name)+".luau · read only";
-        lastSuccessfulLuau=next.generated;
-        priorSuccessfulLuau=null;
         renderProjectTabs();
         refreshEditorIntelligence();
         rememberProject();
@@ -6339,6 +6378,7 @@ local part = message[1:7]`;
           file.disposeChange.dispose();file.model.dispose();file.output.dispose();
         }
         projectFiles.clear();activeFile=null;
+        diffSnapshots.length=0; // Different projects should never share comparison history.
         for(const entry of imported)createProjectFile(entry.name,entry.source,{silent:true});
         switchProjectFile("main.laua");
         lintAllProjectFiles();rememberProject();
@@ -6373,7 +6413,7 @@ local part = message[1:7]`;
             entries.push({name:"COMPILATION_ERRORS.txt",content:"The Laua source files were all exported. Some generated Luau files were omitted because compilation failed.\n\n"+failures.join("\n")+"\n"});
           }
           const zip=makeProjectZip(entries);
-          downloadProjectBlob("Laua-v3.16-project.zip",zip);
+          downloadProjectBlob("Laua-v3.19-project.zip",zip);
           projectStatus().textContent=`Exported all ${all.length} Laua source files and ${generatedCount} Luau outputs.${failures.length?` ${failures.length} file(s) failed; see COMPILATION_ERRORS.txt in the ZIP.`:""}`;
           projectStatus().className=failures.length?"error":"ok";
         } catch(error) {
@@ -6610,18 +6650,25 @@ local part = message[1:7]`;
       }
 
 
-      let lastSuccessfulLuau = null;
-      let priorSuccessfulLuau = null;
+      // Only explicit user-requested transpiles enter Output Diff history.
+      // Background compilation (startup, tab switching, copying and exporting)
+      // must never replace comparison snapshots.
+      const diffSnapshots = [];
 
-      function runTranspile() {
+      function runTranspile(recordForDiff = false) {
         try {
           const file = projectFiles.get(activeFile);
           const importErrors = projectImportMarkers(file);
           if (importErrors.length) throw new Error(importErrors.map(item=>item.message).join("; "));
           const output = transpile(lauaEditor.getValue(), {Mode: document.getElementById("modeSelect").value,OutputStyle:document.getElementById("outputStyleSelect").value});
-          if (lastSuccessfulLuau !== output) {
-            priorSuccessfulLuau = lastSuccessfulLuau;
-            lastSuccessfulLuau = output;
+          if (recordForDiff) {
+            diffSnapshots.push({
+              filename: activeFile,
+              output,
+              mode: document.getElementById("modeSelect").value,
+              style: document.getElementById("outputStyleSelect").value
+            });
+            if (diffSnapshots.length > 2) diffSnapshots.shift();
           }
           luauEditor.setValue(output);
           file.generated=output;
@@ -6629,7 +6676,7 @@ local part = message[1:7]`;
           const inputBytes = new TextEncoder().encode(lauaEditor.getValue()).length;
           const outputBytes = new TextEncoder().encode(output).length;
           const savedBytes = Math.max(0, inputBytes-outputBytes);
-          status.textContent = `Transpiled · ${document.getElementById("modeSelect").value} · ${inputBytes.toLocaleString()} → ${outputBytes.toLocaleString()} bytes${savedBytes ? ` · ${savedBytes.toLocaleString()} fewer bytes` : ""} · Roblox optimize ${directives.optimize ?? "default"}`;
+          status.textContent = `Transpiled · ${document.getElementById("modeSelect").value} · ${inputBytes.toLocaleString()} → ${outputBytes.toLocaleString()} bytes${savedBytes ? ` · ${savedBytes.toLocaleString()} fewer bytes` : ""} · Roblox optimize ${directives.optimize ?? "default"}${recordForDiff ? (diffSnapshots.length === 2 ? " · Output Diff ready" : " · Output Diff 1/2") : ""}`;
           status.className = "ok";
           return output;
         } catch (err) {
@@ -6796,19 +6843,24 @@ local part = message[1:7]`;
       document.getElementById("nextErrorBtn").addEventListener("click",jumpToNextProblem);
       lauaEditor.addCommand(monaco.KeyCode.F8,jumpToNextProblem);
       document.getElementById("lintBtn").addEventListener("click", () => runLint(true));
-      document.getElementById("transpileBtn").addEventListener("click", runTranspile);
+      document.getElementById("transpileBtn").addEventListener("click", () => runTranspile(true));
       copyButton.addEventListener("click", copyTranspiledCode);
-      document.getElementById("modeSelect").addEventListener("change", runTranspile);
-      document.getElementById("outputStyleSelect").addEventListener("change", runTranspile);
+      document.getElementById("modeSelect").addEventListener("change", () => runTranspile(true));
+      document.getElementById("outputStyleSelect").addEventListener("change", () => runTranspile(true));
       document.getElementById("closeDiffBtn").addEventListener("click", () => document.getElementById("diffDialog").close());
       document.getElementById("diffBtn").addEventListener("click", () => {
-        if (priorSuccessfulLuau === null || lastSuccessfulLuau === null) {
-          status.textContent="Transpile two different versions before opening Output Diff.";
+        if (diffSnapshots.length < 2) {
+          status.textContent=`Output Diff needs two successful manual transpiles (${diffSnapshots.length}/2 captured). Edit and click Transpile again, or transpile another file.`;
           status.className="error";
           return;
         }
-        document.getElementById("diffResult").textContent=diffLuau(priorSuccessfulLuau,lastSuccessfulLuau);
+        const [before, after] = diffSnapshots;
+        const label = `${before.filename} (${before.mode}, ${before.style}) → ${after.filename} (${after.mode}, ${after.style})`;
+        const differences = before.output === after.output ? "No differences in generated Luau output." : diffLuau(before.output,after.output);
+        document.getElementById("diffResult").textContent=label+"\n\n"+differences;
         document.getElementById("diffDialog").showModal();
+        status.textContent=`Output Diff: ${label}`;
+        status.className="ok";
       });
       document.getElementById("docsBtn").addEventListener("click", () => {
         downloadPlaygroundText("Laua_DEFINITIONS.md",generateLauaDocs(lauaEditor.getValue()));
@@ -6865,7 +6917,7 @@ local part = message[1:7]`;
         status.className = "";
       });
 
-      lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runTranspile);
+      lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runTranspile(true));
       lauaEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyL, () => runLint(true));
 
       // Always launch with main.laua selected and populated. Other saved
